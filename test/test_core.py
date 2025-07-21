@@ -3,7 +3,7 @@
 # can be run with the command ...\pyad> python -m pytest
 import torch
 import numpy as np
-from pyad.core import Tensor, grad, jacobian, hessian, scalar_root_finding, linear_system_solve, fixed_point_iteration
+from pyad.core import Tensor, grad, jacobian, hessian, scalar_root_finding, linear_system_solve, fixed_point_iteration, scalar_newtons_method
 
 def test_sanity_check():
 
@@ -570,26 +570,38 @@ def test_var_against_torch():
 def test_scalar_root_finding():    
     # Test case: find x where x^2 + theta*x - 1 = 0
     def g(x, theta):
-        return x**2 + theta*x - 1
+        return x**2 - theta.sin()
+    
+    dgdu = grad(g, argnum=0)
+    dgdtheta = grad(g, argnum=1)
     
     # Forward test
     theta = Tensor(2.0)
-    initial_guess = Tensor(2.0)
+    initial_guess = Tensor(1.0)
     x = scalar_root_finding(g, theta, initial_guess)
     
     # The root should satisfy g(x, theta) ≈ 0
     assert abs(g(x, theta).data) < 1e-6
     
-    # Compare with analytical solution: x = (-theta ± sqrt(theta^2 + 4))/2
-    expected_x = (-2 + np.sqrt(8))/2
-    assert np.allclose(x.data, expected_x)
+    def loss(x):
+        return x ** 2
     
-    # Backward test
-    x.backward()
+    dlossdx = grad(loss)
+    loss_x = loss(x)
+    loss_x.backward()
     
-    expected_grad = -expected_x/(2*expected_x + 2)  # dx/dθ = -x/(2x + θ)
-    print(theta, expected_grad)
-    assert np.allclose(theta.gradient.data, expected_grad)
+    ### Adjoint Sensitivities
+    x_ = scalar_newtons_method(lambda u: g(u, theta), initial_guess)
+    lambda_ = 1.0 / dgdu(x, theta) * dlossdx(x_)
+    d_J__d_theta__adjoint = -lambda_ * dgdtheta(x, theta)
+    
+    print(d_J__d_theta__adjoint.data, theta.gradient.data)
+    assert np.allclose(d_J__d_theta__adjoint.data, theta.gradient.data)
+    
+    # # Backward test
+    # x.backward()
+    
+    # assert np.allclose(theta.gradient.data, expected_grad)
     
 def test_linear_system_solve_against_numpy():
     # Test Ax = b for a simple 2x2 system

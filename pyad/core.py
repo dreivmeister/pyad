@@ -360,9 +360,10 @@ def scalar_root_finding(g, theta, initial_guess):
     
     out = Tensor(x.data, (x, theta))
     
+    
     def backw_op(gradient):
-        theta.gradient -= gradient * (dg_dtheta(x, theta) / (dg_dx(x, theta) + 1e-10))
-        #x.gradient += gradient
+        lambda_ = 1.0 / dg_dx(x, theta) * gradient
+        theta.gradient -= lambda_ * dg_dtheta(x, theta)
     out.backw_op = backw_op
     
     return out
