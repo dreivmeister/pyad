@@ -614,7 +614,7 @@ def test_fixed_point_iteration_against_torch():
 
     # Define phi(x, theta) = cos(x) + theta
     def phi_pyad(x, theta):
-        return Tensor(np.cos(x.data) + theta.data)
+        return x.cos() + theta
 
     def phi_torch(x, theta):
         return torch.cos(x) + theta

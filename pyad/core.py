@@ -406,12 +406,12 @@ def fixed_point_iteration(phi, initial_guess, theta):
     # forward pass to find the fixed point
     # x0 = initial_guess
     x = fixed_point_iteration_helper(phi, initial_guess, theta)
-    out = Tensor(x.data, (initial_guess, theta))
+    out = Tensor(x.data, (theta,))
     dphi_dx = jacobian(lambda u: phi(u, theta)) # theta is constant
     dphi_dtheta = jacobian(lambda u: phi(x, u)) # x is constant
     
     def backw_op(gradient):
-        lambda_ = linear_system_solve_helper((np.eye(len(x.data) - dphi_dx(theta))).transpose().data, gradient.data)
+        lambda_ = linear_system_solve_helper(((np.eye(x.data.shape[0]) - dphi_dx(theta))).transpose().data, gradient.data)
         theta.gradient -= dphi_dtheta(x).transpose().data @ lambda_
     out.backw_op = backw_op
     
