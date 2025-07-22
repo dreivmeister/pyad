@@ -367,6 +367,34 @@ def scalar_root_finding(g, theta, initial_guess):
     
     return out
 
+def fixed_point_iteration_helper(phi, curr_val, theta, max_iter=100, tol=1e-8):
+    # x_k+1 = phi(x_k)
+    # vector version
+    for _ in range(max_iter):
+        new_val = phi(curr_val, theta)
+        if np.linalg.norm(new_val.data - curr_val.data) < tol:
+            break
+        curr_val = new_val
+    return curr_val
+
+def fixed_point_iteration(phi, initial_guess, theta):
+    # forward pass to find the fixed point
+    # x0 = initial_guess
+    x = fixed_point_iteration_helper(phi, initial_guess, theta)
+    dphi_dx = jacobian(lambda u: phi(u, theta)) # theta is constant
+    dphi_dtheta = jacobian(lambda u: phi(x, u)) # x is constant
+    
+    out = Tensor(x.data, (initial_guess, theta))
+    
+    def backw_op(gradient):
+        theta_ = Tensor(np.copy(theta.data))
+        x_ = Tensor(np.copy(x.data))
+        lambda_ = linear_system_solve_helper(((np.eye(x_.data.shape[0]) - dphi_dx(x_))).transpose().data, gradient.data)
+        theta.gradient -= dphi_dtheta(theta_).transpose().data @ lambda_
+    out.backw_op = backw_op
+    
+    return out
+
 def linear_system_solve_helper(A, b):
     P, L, U = lu(A)
     P_Tb = P.T @ b
@@ -388,31 +416,6 @@ def linear_system_solve(A, b):
         theta = linear_system_solve(A.transpose(), gradient)
         A.gradient += -theta.outer(out)
         b.gradient += theta
-    out.backw_op = backw_op
-    
-    return out
-
-def fixed_point_iteration_helper(phi, curr_val, theta, max_iter=100, tol=1e-8):
-    # x_k+1 = phi(x_k)
-    # vector version
-    for _ in range(max_iter):
-        new_val = phi(curr_val, theta)
-        if np.linalg.norm(new_val.data - curr_val.data) < tol:
-            break
-        curr_val = new_val
-    return curr_val
-
-def fixed_point_iteration(phi, initial_guess, theta):
-    # forward pass to find the fixed point
-    # x0 = initial_guess
-    x = fixed_point_iteration_helper(phi, initial_guess, theta)
-    out = Tensor(x.data, (theta,))
-    dphi_dx = jacobian(lambda u: phi(u, theta)) # theta is constant
-    dphi_dtheta = jacobian(lambda u: phi(x, u)) # x is constant
-    
-    def backw_op(gradient):
-        lambda_ = linear_system_solve_helper(((np.eye(x.data.shape[0]) - dphi_dx(theta))).transpose().data, gradient.data)
-        theta.gradient -= dphi_dtheta(x).transpose().data @ lambda_
     out.backw_op = backw_op
     
     return out

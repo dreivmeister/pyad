@@ -625,8 +625,8 @@ def test_fixed_point_iteration_against_torch():
         return torch.cos(x) + theta
 
     # Initial guess and parameter
-    x0_np = Tensor(np.array([0.5]))
-    theta_np = Tensor(np.array([0.1]))
+    x0_np = Tensor([0.5])
+    theta_np = Tensor([0.1])
     x0_torch = torch.tensor([0.5], dtype=torch.float64)
     theta_torch = torch.tensor([0.1], dtype=torch.float64, requires_grad=True)
 
@@ -664,3 +664,4 @@ def test_fixed_point_iteration_against_torch():
     grad_pyad = theta_np.gradient.data
 
     assert np.allclose(grad_pyad, grad_torch, atol=1e-6)
+    
