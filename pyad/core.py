@@ -358,12 +358,11 @@ def scalar_root_finding(g, theta, initial_guess):
     dg_dx = grad(g, argnum=0)
     dg_dtheta = grad(g, argnum=1)
     
-    out = Tensor(x.data, (x, theta))
-    
+    out = Tensor(x.data, (initial_guess, theta))
     
     def backw_op(gradient):
-        lambda_ = 1.0 / dg_dx(x, theta) * gradient
-        theta.gradient -= lambda_ * dg_dtheta(x, theta)
+        theta_ = Tensor(np.copy(theta.data))
+        theta.gradient -= 1.0 / dg_dx(x, theta_) * dg_dtheta(x, theta_) * gradient
     out.backw_op = backw_op
     
     return out
