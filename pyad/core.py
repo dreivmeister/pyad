@@ -1,6 +1,7 @@
 # contains the Tensor class which wraps a np array and provides gradient computation
 import numpy as np
 from scipy.linalg import lu, solve_triangular
+from scipy.signal import convolve2d, correlate2d
 from math import prod
 
 def promote_array_to_tensor(array):
@@ -177,6 +178,7 @@ class Tensor:
         
         return out
 
+    @staticmethod
     def relu(self):
         # only first derivative
         out = Tensor(self.data * (self.data > 0), (self,))
@@ -187,6 +189,7 @@ class Tensor:
         
         return out
 
+    @staticmethod
     def tanh(self):
         out = Tensor(np.tanh(self.data), (self,))
 
@@ -255,7 +258,6 @@ class Tensor:
         out.backw_op = backw_op
         
         return out
-    
     
     # only first derivative
     def mean(self, axis=None):
@@ -326,6 +328,35 @@ class Tensor:
 
         def backw_op(gradient):
             self.gradient += gradient.reshape(self.data.shape)
+        out.backw_op = backw_op
+        
+        return out
+    
+    @staticmethod
+    def conv2d(x, kernels, output_shape):
+        # only stride=1 and valid padding
+        #https://github.com/TheIndependentCode/Neural-Network/blob/master/convolutional.py
+        # x is the input image
+        
+        batch_size, out_channels, out_height, out_width = output_shape
+        out = np.random.randn(*output_shape) # bias
+        
+        in_channels = x.shape[1]
+        for k in range(batch_size):
+            for i in range(out_channels):
+                for j in range(in_channels):
+                    out[k,i] += correlate2d(x.data[k,j], kernels.data[i,j], "valid")
+        out = Tensor(out, (x, kernels))
+        
+        def backw_op(gradient):
+            x.gradient = np.zeros_like(x.data)
+            kernels.gradient = np.zeros_like(kernels.data)
+
+            for k in range(batch_size):
+                for i in range(out_channels):
+                    for j in range(in_channels):
+                        kernels.gradient[i,j] += correlate2d(x.data[k,j], gradient[k,i], "valid")
+                        x.gradient[k,j] += convolve2d(gradient[k,i], kernels.data[i,j], "full")
         out.backw_op = backw_op
         
         return out
@@ -449,6 +480,42 @@ def nonlinear_system_solving(g, theta, initial_guess):
     
     return out
 """
+
+"""
+from scipy.integrate import solve_ivp
+
+def neural_ode(f, u0, T, theta):
+    sol = solve_ivp(f, [0, T], u0.data, args=(theta,), t_eval=[T]) # only care about the final value
+    if sol.success:
+        out = Tensor(sol.y[:, -1], (u0, theta))
+    else:
+        raise RuntimeError("ODE solve failed")
+    
+    df_du = jacobian(lambda u: f(T, u, theta))  # Jacobian of f at time T
+    df_dtheta = jacobian(lambda u: f(T, u0, u))  # Jacobian of f w.r.t. theta at time T
+    
+    def backw_op(gradient):
+        def lambda_(t, u, theta):
+            # lambda is the adjoint variable
+            return -df_du(t, u, theta) * u
+        sol_lambda = solve_ivp(lambda_, [T, 0], sol.y[:, -1], args=(theta,))
+        adjoint = -gradient.data * sol.y[:, -1]
+        # we need to compute the gradient of the integral
+        def adjoint_f(t, u):
+            return -f(u, theta).data * adjoint
+        # we can use the same solver to compute the adjoint
+        adjoint_sol = solve_ivp(adjoint_f, [T, 0], sol.y[:, -1], args=(theta,), t_eval=[0])
+        if adjoint_sol.success:
+            theta_ = Tensor(adjoint_sol.y[:, -1], (theta,))
+            theta.gradient += theta_.data
+        else:
+            raise RuntimeError("Adjoint sensitivity computation failed")
+    out.backw_op = backw_op
+    
+    return out
+""" 
+    
+    
 
 # the subval, vjp and grad functions are taken from autodidact and adapted handle lists of tensors:
 # https://github.com/mattjj/autodidact
