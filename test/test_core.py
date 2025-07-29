@@ -10,7 +10,7 @@ def test_sanity_check():
     x = Tensor(-4.0)
     z = 2 * x + 2 + x
     q = z + z * x
-    h = (z * z).relu()
+    h = Tensor.relu(z * z)
     y = h + q + q * x
     y.backward()
     xmg, ymg = x, y
@@ -34,11 +34,11 @@ def test_more_ops():
     a = Tensor(-4.0)
     b = Tensor(2.0)
     c = a + b
-    d = (a * b + b**3).tanh()
+    d = Tensor.tanh(a * b + b**3)
     c += c + 1
     c += 1 + c + (-a)
-    d += d * 2 + (b + a).relu()
-    d += 3 * d + (b - a).relu()
+    d += d * 2 + Tensor.relu(b + a)
+    d += 3 * d + Tensor.relu(b - a)
     e = c - d
     f = e**2
     g = f / 2.0
@@ -269,7 +269,7 @@ def test_even_more_ops():
     a = Tensor(1.0)
     b = Tensor(2.0)
     c = a + b
-    d = (a * b + b**3).tanh().log()
+    d = Tensor.tanh(a * b + b**3).log()
     c += c + 1
     c += 1 + c + (-a)
     d += d * 2 + (b + a)#.sin()

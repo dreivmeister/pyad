@@ -1,11 +1,11 @@
 import numpy as np
-from core import Tensor
+from .core import Tensor
 
 
 class Module:
     def zero_grad(self):
         for p in self.parameters():
-            p.gradient = 0
+            p.gradient = None
 
     def parameters(self):
         return []
@@ -18,16 +18,24 @@ class Dense(Module):
         if bias:
             self.b = Tensor(np.zeros((nout,)))
         self.bias = bias
-        self.nonlin = nonlin
         
         if nonlin is not None:
             self.nonlin = getattr(Tensor, nonlin)
+        else:
+            self.nonlin = None
         
     def __call__(self, x):
-        out = self.W @ x
-        if self.bias is not None:
+        # Ensure x is a Tensor
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+            
+        out = x.dot(self.W)
+        
+        if self.bias:
             out = out + self.b
-        return self.nonlin(out) if self.nonlin else out
+        if self.nonlin is not None:
+            out = self.nonlin(out)
+        return out
     
     def parameters(self):
         if self.bias:
@@ -167,29 +175,29 @@ class Conv2d(Module):
     
 class AttentionHead(Module):
     def __init__(self, block_size, n_embd, head_size, dropout=0.2, mask=False):
-        self.key = LinearLayer(n_embd, head_size, bias=False)
-        self.query = LinearLayer(n_embd, head_size, bias=False)
-        self.value = LinearLayer(n_embd, head_size, bias=False)
+        self.key = Dense(n_embd, head_size, bias=False)
+        self.query = Dense(n_embd, head_size, bias=False)
+        self.value = Dense(n_embd, head_size, bias=False)
         self.do_mask = mask
         if mask:
             m = np.zeros((block_size,block_size))
             m[np.triu_indices(block_size,1)] = -np.inf
-            self.mask = T(m)
+            self.mask = Tensor(m)
         
         self.dropout = Dropout(dropout)
     
     def __call__(self, x):
-        b, t, c = x.shape # (10,4,16) (batch_size,block_size,n_embd)
+        b, t, c = x.shape # (batch_size,block_size,n_embd)
         k = self.key(x) # (batch_size,block_size,n_embd) @ (n_embd, head_size) 
         q = self.query(x) # (B,T,C)
-        wei = T.matmul(q, T.transpose(k, (0,2,1))) # transpose last two dims
+        wei = q @ T.transpose(k, (0,2,1)) # transpose last two dims
         if self.do_mask:
             wei = wei + self.mask
         wei = softmax(wei, axis=2) # (B, T, T)
         wei = self.dropout(wei)
         
         v = self.value(x)
-        out = T.matmul(wei, v)
+        out = wei @ v
         return out
     
     def parameters(self):

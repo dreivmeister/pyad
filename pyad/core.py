@@ -15,6 +15,9 @@ def argsort(x):
 
 class Tensor:
     def __init__(self, data, prev_tensors=(), dtype=np.float64):
+        # Unwrap if data is already a Tensor
+        while isinstance(data, Tensor):
+            data = data.data
         self.data = np.asarray(data, dtype=dtype) # actual value
         self.prev_tensors = prev_tensors # tensors that were used to compute this tensor
         self.gradient = None # gradient of this tensor
@@ -184,7 +187,7 @@ class Tensor:
         out = Tensor(self.data * (self.data > 0), (self,))
 
         def backw_op(gradient):
-            self.gradient += (self.data > 0) * gradient
+            self.gradient += (self.data > 0) * gradient.data
         out.backw_op = backw_op
         
         return out
