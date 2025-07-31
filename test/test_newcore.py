@@ -459,7 +459,7 @@ def test_var_against_torch():
 
 import torch.nn.functional as F
 def test_softmax_against_torch():
-    x_np = np.random.rand(2, 3)
+    x_np = np.random.rand(3, 5)
     x = Tensor(x_np)
     y = x.softmax(axis=1)
     y.sum().backward()
@@ -470,3 +470,73 @@ def test_softmax_against_torch():
     
     assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6)
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
+    
+    
+def test_max_against_torch():
+    # 1D case
+    x_np = np.array([1.0, 3.0, 2.0, 5.0])
+    x = Tensor(x_np)
+    y = x.max()
+    y.backward()
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    yt = xt.max()
+    yt.backward()
+    assert np.allclose(y.data, yt.detach().numpy())
+    assert np.allclose(x.grad, xt.grad.numpy())
+
+    # 2D case, axis=0
+    x_np = np.array([[1.0, 3.0, 2.0], [4.0, 0.0, 5.0]])
+    x = Tensor(x_np)
+    y = x.max(axis=0)
+    y.sum().backward()
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    yt = xt.max(dim=0).values
+    yt.sum().backward()
+    assert np.allclose(y.data, yt.detach().numpy())
+    assert np.allclose(x.grad, xt.grad.numpy())
+
+    # 2D case, axis=1, keepdims=True
+    x_np = np.array([[1.0, 3.0, 2.0], [4.0, 0.0, 5.0]])
+    x = Tensor(x_np)
+    y = x.max(axis=1, keepdims=True)
+    y.sum().backward()
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    yt = xt.max(dim=1, keepdim=True).values
+    yt.sum().backward()
+    assert np.allclose(y.data, yt.detach().numpy())
+    assert np.allclose(x.grad, xt.grad.numpy())
+    
+    
+def test_conv2d_against_torch():
+    # Parameters
+    batch_size = 2
+    in_channels = 3
+    out_channels = 4
+    height = 8
+    width = 8
+    kernel_size = 3
+
+    x_np = np.random.randn(batch_size, in_channels, height, width)
+    w_np = np.random.randn(out_channels, in_channels, kernel_size, kernel_size)
+
+    # PyAD tensors
+    x = Tensor(x_np)
+    w = Tensor(w_np)
+
+    # PyTorch tensors
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    wt = torch.tensor(w_np, dtype=torch.float64, requires_grad=True)
+
+    # Forward
+    y = x.conv2d(w)    
+    yt = F.conv2d(xt, wt)
+
+    assert y.shape == yt.shape
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6)
+
+    # Backward
+    y.sum().backward()
+    yt.sum().backward()
+
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
+    assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-6)

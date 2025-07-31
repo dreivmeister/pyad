@@ -35,7 +35,7 @@ class Tensor:
         self.grad = np.zeros_like(self.data, dtype=np.float64)
         self.op = op
         self.grad_fn = lambda x: None
-        self.broadcast_dim = None
+        #self.broadcast_dim = None
         self.name = name
         
     def __repr__(self):
@@ -86,16 +86,16 @@ class Tensor:
         for t in reversed(topo):
             t.grad_fn(t.grad)
     
-    def checkbroadcast(self, other):
-        for n,(i,j) in enumerate(zip(self.shape, other.shape)):
-            if i==j:
-                continue
-            if i<j:
-                self.broadcast_dim = n
-                break
-            else:
-                other.broadcast_dim = n
-                break
+    # def checkbroadcast(self, other):
+    #     for n,(i,j) in enumerate(zip(self.shape, other.shape)):
+    #         if i==j:
+    #             continue
+    #         if i<j:
+    #             self.broadcast_dim = n
+    #             break
+    #         else:
+    #             other.broadcast_dim = n
+    #             break
     
     @staticmethod
     def zeros(shape):
@@ -241,6 +241,61 @@ class Tensor:
     def __neg__(self):
         return self * -1
     
+    def sum(self, axis=None, keepdims=False):
+        input_shape = self.data.shape
+        out = Tensor(np.sum(self.data, axis=axis, keepdims=keepdims), (self,), op=self.sum)
+        def grad_fn(gradient):
+            # Always broadcast gradient to input shape
+            self.grad += np.broadcast_to(np.expand_dims(gradient, axis) if axis is not None and not keepdims else gradient, input_shape)
+        out.grad_fn = grad_fn
+        return out
+    
+    def mean(self, axis=None, keepdims=False):
+        out = Tensor(np.mean(self.data, axis=axis, keepdims=keepdims), (self,), op=self.mean)
+        if axis == None:
+            n = self.data.size
+        elif axis == 0:
+            n = self.data.shape[0]
+        else:
+            n = self.data.shape[1]
+        
+        def grad_fn(gradient):
+            if keepdims == False:
+                if axis == None or axis == 0:
+                    self.grad += gradient * np.ones_like(self.data)*(1./n)
+                if axis == 1:
+                    self.grad += gradient.T * np.ones_like(self.data)*(1./n)
+            else:
+                self.grad += gradient * np.ones_like(self.data)*(1./n)
+                
+        out.grad_fn = grad_fn
+        
+        return out
+    
+    def var(self, axis=None, keepdims=False):
+        out = Tensor(np.var(self.data, axis=axis, keepdims=keepdims), (self,), op=self.var)
+        m = np.mean(self.data, axis=axis, keepdims=keepdims)
+        n = self.data.size
+        if axis == None:
+            n = self.data.size
+        elif axis == 0:
+            n = self.data.shape[0]
+        else:
+            n = self.data.shape[1]
+        
+        
+        def grad_fn(gradient):
+            if keepdims == False:
+                if axis == None or axis == 0:
+                    self.grad += gradient * ((2./n)*(self.data - m))
+                if axis == 1:
+                    self.grad += gradient.T * ((2./n)*(self.data - np.expand_dims(m,axis=1)))
+            else:
+                self.grad += gradient * ((2./n)*(self.data - m))
+        out.grad_fn = grad_fn
+        
+        return out
+    
     def sin(self):
         out = Tensor(np.sin(self.data), (self,), op=self.sin)
         
@@ -303,20 +358,6 @@ class Tensor:
         
         return out
 
-    def max(self, axis=None, keepdims=False):
-        m = np.max(self.data, axis=axis, keepdims=keepdims)
-        out = Tensor(m, (self,), op=self.max)
-        
-        def grad_fn(gradient):
-            mask = np.equal(self.data, m).astype(np.float32)
-            axis_sums = np.sum(mask,axis=axis,keepdims=True)
-            mask = mask / axis_sums
-            
-            self.grad += gradient * mask 
-        out.grad_fn = grad_fn
-        
-        return out
-    
     def max(self, axis=None, keepdims=True):
         m = np.max(self.data, axis=axis, keepdims=keepdims)
         out = Tensor(m, (self,), op=self.max)
@@ -328,43 +369,21 @@ class Tensor:
         return out
     
     def reshape(self, new_shape):
-        input_shape = self.data.shape
         out = Tensor(np.reshape(self.data, new_shape), (self,), op=self.reshape)
         
         def grad_fn(gradient):
-            self.grad += np.reshape(gradient, input_shape)
+            self.grad += np.reshape(gradient, self.data.shape)
         out.grad_fn = grad_fn
         
         return out
     
     def transpose(self, order):
-        input_order = order
         out = Tensor(np.transpose(self.data, order), (self,), op=self.transpose)
         
         def grad_fn(gradient):
-            self.grad += np.transpose(gradient, argsort(input_order))
+            self.grad += np.transpose(gradient, argsort(order))
         out.grad_fn = grad_fn
 
-        return out
-    
-    def transpose(self, new_axis=None):
-        if self.data.ndim == 2:
-            out = Tensor(self.data.T, (self,), op=self.transpose)
-            
-            def grad_fn(gradient):
-                # gradient.shape == out.shape
-                self.grad += gradient.T 
-            out.grad_fn = grad_fn
-        # nd case
-        elif new_axis is not None:
-            old_shape = self.data.shape
-            out = Tensor(np.transpose(self.data, new_axis), (self,), op=self.transpose)
-            
-            def grad_fn(gradient):
-                # gradient.shape == out.shape
-                self.grad += np.transpose(gradient, new_axis) 
-            out.grad_fn = grad_fn
-                
         return out
     
     @staticmethod
@@ -422,15 +441,13 @@ class Tensor:
 
         return out
     
-    # expand is basically broadcast_to
-    def expand(self, new_shape):
-        input_shape = self.data.shape
-        out = Tensor(np.broadcast_to(self.data, new_shape), (self,), op=self.expand)
-        
-        def grad_fn(gradient):
-            self.grad += np.sum(gradient, shape_to_axis(gradient.shape,input_shape), keepdims=True) \
-                if tuple(gradient.shape) != tuple(input_shape) else gradient
-        out.grad_fn = grad_fn
+    def broadcast_to(self, shape):
+        out = Tensor(np.broadcast_to(self.data, shape), (self,))
+
+        def backw_op(gradient):
+            self.gradient += np.sum(gradient, shape_to_axis(gradient.shape,self.data.shape), keepdims=True) \
+                if tuple(gradient.shape) != tuple(self.data.shape) else gradient
+        out.backw_op = backw_op
         
         return out
     
@@ -478,28 +495,28 @@ class Tensor:
         
         return out
 
-    def conv2d(self, kernels, output_shape):
+    def conv2d(self, kernels):
         # only stride=1 and valid padding
         #https://github.com/TheIndependentCode/Neural-Network/blob/master/convolutional.py
         # self is the input image
         # other is a kernel
-        # forward
         
-        batch_size, out_channels, out_height, out_width = output_shape
+        out_channels, in_channels, kernel_size, kernel_size = kernels.shape
+        batch_size, in_channels, input_height, input_width = self.shape
+        output_shape = (batch_size, out_channels, input_height - kernel_size + 1, input_width - kernel_size + 1)
         out = np.random.randn(*output_shape)
         
         in_channels = self.shape[1]
-        #out = np.zeros_like(*output_shape)
         for k in range(batch_size):
             for i in range(out_channels):
                 for j in range(in_channels):
-                    out[k,i] += signal.correlate2d(self.data[k,j],kernels.data[i,j], "valid")
+                    out[k,i] += signal.correlate2d(self.data[k,j], kernels.data[i,j], "valid")
         
         out = Tensor(out, (self, kernels), op=self.conv2d)
+        
         def grad_fn(gradient):
             self.grad = np.zeros_like(self.data)
             kernels.grad = np.zeros_like(kernels.data)
-
             for k in range(batch_size):
                 for i in range(out_channels):
                     for j in range(in_channels):
@@ -585,77 +602,29 @@ class Tensor:
         
         return out
     
-    def sum(self, axis=None, keepdims=False):
-        input_shape = self.data.shape
-        out = Tensor(np.sum(self.data, axis=axis, keepdims=keepdims), (self,), op=self.sum)
-        def grad_fn(gradient):
-            # Always broadcast gradient to input shape
-            self.grad += np.broadcast_to(np.expand_dims(gradient, axis) if axis is not None and not keepdims else gradient, input_shape)
-        out.grad_fn = grad_fn
-        return out
-    
-    def mean(self, axis=None, keepdims=False):
-        out = Tensor(np.mean(self.data, axis=axis, keepdims=keepdims), (self,), op=self.mean)
-        if axis == None:
-            n = self.data.size
-        elif axis == 0:
-            n = self.data.shape[0]
-        else:
-            n = self.data.shape[1]
-        
-        def grad_fn(gradient):
-            if keepdims == False:
-                if axis == None or axis == 0:
-                    self.grad += gradient * np.ones_like(self.data)*(1./n)
-                if axis == 1:
-                    self.grad += gradient.T * np.ones_like(self.data)*(1./n)
-            else:
-                self.grad += gradient * np.ones_like(self.data)*(1./n)
-                
-        out.grad_fn = grad_fn
-        
-        return out
-    
-    def var(self, axis=None, keepdims=False):
-        out = Tensor(np.var(self.data, axis=axis, keepdims=keepdims), (self,), op=self.var)
-        m = np.mean(self.data, axis=axis, keepdims=keepdims)
-        n = self.data.size
-        if axis == None:
-            n = self.data.size
-        elif axis == 0:
-            n = self.data.shape[0]
-        else:
-            n = self.data.shape[1]
-        
-        
-        def grad_fn(gradient):
-            if keepdims == False:
-                if axis == None or axis == 0:
-                    self.grad += gradient * ((2./n)*(self.data - m))
-                if axis == 1:
-                    self.grad += gradient.T * ((2./n)*(self.data - np.expand_dims(m,axis=1)))
-            else:
-                self.grad += gradient * ((2./n)*(self.data - m))
-        out.grad_fn = grad_fn
-        
-        return out
-    
-    def softmax(self, axis=1):
-        # computes softmax of self tensor
-        # subtract max
-        self.data = self.data - np.max(self.data, axis=axis, keepdims=True)
-        # Compute the softmax
-        ex = np.exp(self.data)
+    def softmax(self, axis=-1):
+        # computes softmax of self tensor along any axis
+        x = self.data
+        # subtract max for numerical stability
+        x_max = np.max(x, axis=axis, keepdims=True)
+        ex = np.exp(x - x_max)
         sigma = ex / np.sum(ex, axis=axis, keepdims=True)
-        #sigma = np.reshape(sigma, (1, -1))
-        print(sigma.shape)
         out = Tensor(sigma, (self,), op=self.softmax)
-        
+
         def grad_fn(gradient):
-            d_sigma = sigma * np.identity(sigma.shape[axis]) - sigma.T @ sigma
-            print(d_sigma.shape)
-            print(gradient.shape)
-            self.grad = self.grad + gradient @ d_sigma
+            # gradient: same shape as sigma
+            # For each slice along axis, compute the Jacobian-vector product
+            grad = np.zeros_like(sigma)
+            # Move axis to -1 for easier iteration
+            sigma_swap = np.moveaxis(sigma, axis, -1)
+            grad_swap = np.moveaxis(gradient, axis, -1)
+            for idx in np.ndindex(sigma_swap.shape[:-1]):
+                s = sigma_swap[idx]
+                g = grad_swap[idx]
+                grad_swap[idx] = s * (g - np.sum(g * s)) # vjp
+            # Move axis back to original position
+            grad = np.moveaxis(grad_swap, -1, axis)
+            self.grad += grad
         out.grad_fn = grad_fn
         
         return out
