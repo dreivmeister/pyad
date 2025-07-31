@@ -528,8 +528,10 @@ def test_conv2d_against_torch():
     wt = torch.tensor(w_np, dtype=torch.float64, requires_grad=True)
 
     # Forward
-    y = x.conv2d(w)    
-    yt = F.conv2d(xt, wt)
+    y = x.conv2d(w, bias=False)    
+    m = torch.nn.Conv2d(in_channels, out_channels, kernel_size, bias=False)
+    m.weight = torch.nn.Parameter(wt)
+    yt = m(xt)
 
     assert y.shape == yt.shape
     assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6)
@@ -539,4 +541,66 @@ def test_conv2d_against_torch():
     yt.sum().backward()
 
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
-    assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-6)
+    assert np.allclose(w.grad, m.weight.grad.numpy(), atol=1e-6)
+    
+    
+def test_maxpool2d_against_torch():
+    # Parameters
+    batch_size = 2
+    channels = 3
+    height = 8
+    width = 8
+    kernel_size = 2
+    stride = 2
+
+    np.random.seed(42)
+    x_np = np.random.randn(batch_size, channels, height, width)
+    x = Tensor(x_np)
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+
+    # Forward
+    y = x.maxpool2d(kernel_size, kernel_size, stride)
+    yt = F.max_pool2d(xt, kernel_size=kernel_size, stride=stride)
+
+    assert y.shape == yt.shape
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6)
+
+    # Backward
+    y.sum().backward()
+    yt.sum().backward()
+
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
+    
+    
+from pyad.new_core import MLP
+from pyad.optim import Adam
+def test_mlp_xor():
+    # XOR dataset
+    X_np = Tensor(np.array([[0,0],[0,1],[1,0],[1,1]], dtype=np.float64))
+    y_np = Tensor(np.array([[0],[1],[1],[0]], dtype=np.float64))
+    print(X_np.shape, y_np.shape)
+
+    # # Convert to Tensor
+    # X = [Tensor(x) for x in X_np]
+    # y = [Tensor(t) for t in y_np]
+
+    mlp = MLP(2, [16, 1], nonlin='tanh')
+    optim = Adam(mlp.parameters())    
+
+    for epoch in range(300):
+        total_loss = 0
+        mlp.zero_grad()
+        #for xi, yi in zip(X, y):
+        out = mlp(X_np)
+        loss = ((out - y_np) ** 2).sum()
+        loss.backward()
+        total_loss += loss.data
+        optim.step()
+        # if epoch % 100 == 0:
+        #     print(f"Epoch {epoch}, Loss: {total_loss}")
+
+    # Test predictions
+    preds = mlp(X_np)
+    print(((preds - y_np) ** 2).sum())
+    # Should be close to [0, 1, 1, 0]
+    assert ((preds - y_np) ** 2).sum().data < 0.1

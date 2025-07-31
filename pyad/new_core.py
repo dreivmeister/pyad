@@ -186,8 +186,8 @@ class Tensor:
         other = other if isinstance(other, Tensor) else Tensor(other)
         out = Tensor(self.data + other.data, (self, other), op=self.__add__)
         def grad_fn(gradient):
-            self.grad += gradient #if self.broadcast_dim is None else gradient.sum(axis=self.broadcast_dim, keepdims=True)
-            other.grad += gradient #if other.broadcast_dim is None else gradient.sum(axis=other.broadcast_dim, keepdims=True)
+            self.grad = self.grad + gradient #if self.broadcast_dim is None else gradient.sum(axis=self.broadcast_dim, keepdims=True)
+            other.grad = other.grad + gradient #if other.broadcast_dim is None else gradient.sum(axis=other.broadcast_dim, keepdims=True)
         out.grad_fn = grad_fn
         return out
     
@@ -204,15 +204,15 @@ class Tensor:
         other = other if isinstance(other, Tensor) else Tensor(other)
         out = Tensor(self.data * other.data, (self, other), op=self.__mul__)
         def grad_fn(gradient):
-            if self.data.ndim == 0: # scalar * vector
-                self.grad += np.dot(gradient, other.data)
-            else:
-                self.grad = self.grad + gradient * other.data
+            # if self.data.ndim == 0: # scalar * vector
+            #     self.grad = self.grad + np.dot(gradient, other.data)
+            # else:
+            self.grad = self.grad + gradient * other.data
             
-            if other.data.ndim == 0: # vector * scalar
-                other.grad += np.dot(gradient, self.data)
-            else:
-                other.grad = other.grad + gradient * self.data
+            # if other.data.ndim == 0: # vector * scalar
+            #     other.grad = other.grad + np.dot(gradient, self.data)
+            # else:
+            other.grad = other.grad + gradient * self.data
         out.grad_fn = grad_fn
         return out
     
@@ -495,23 +495,24 @@ class Tensor:
         
         return out
 
-    def conv2d(self, kernels):
+    def conv2d(self, kernels, bias=True):
         # only stride=1 and valid padding
         #https://github.com/TheIndependentCode/Neural-Network/blob/master/convolutional.py
         # self is the input image
-        # other is a kernel
         
         out_channels, in_channels, kernel_size, kernel_size = kernels.shape
         batch_size, in_channels, input_height, input_width = self.shape
         output_shape = (batch_size, out_channels, input_height - kernel_size + 1, input_width - kernel_size + 1)
-        out = np.random.randn(*output_shape)
+        if bias:
+            out = np.random.randn(*output_shape)
+        else:
+            out = np.zeros(output_shape)
         
         in_channels = self.shape[1]
         for k in range(batch_size):
             for i in range(out_channels):
                 for j in range(in_channels):
                     out[k,i] += signal.correlate2d(self.data[k,j], kernels.data[i,j], "valid")
-        
         out = Tensor(out, (self, kernels), op=self.conv2d)
         
         def grad_fn(gradient):
@@ -520,8 +521,8 @@ class Tensor:
             for k in range(batch_size):
                 for i in range(out_channels):
                     for j in range(in_channels):
-                        kernels.grad[i,j] += signal.correlate2d(self.data[k,j],gradient[k,i],"valid")
-                        self.grad[k,j] += signal.convolve2d(gradient[k,i],kernels.data[i,j],"full")
+                        kernels.grad[i,j] += signal.correlate2d(self.data[k,j], gradient[k,i], "valid")
+                        self.grad[k,j] += signal.convolve2d(gradient[k,i], kernels.data[i,j], "full")
         out.grad_fn = grad_fn
         
         return out
@@ -633,14 +634,7 @@ class Tensor:
 class Module: 
     def zero_grad(self):
         for p in self.parameters():
-            p.grad = 0
-            # or: p.grad = np.zeros_like(p.data)
-    
-    def step(self, lr):
-        # sgd update step
-        for p in self.parameters():
-            # p.data = p.data - lr * p.grad
-            p.data -= lr * p.grad
+            p.grad = np.zeros_like(p.data)
     
     def parameters(self):
         return []
@@ -695,18 +689,18 @@ class LinearLayer(Module):
     def __init__(self, nin, nout, bias=True, nonlin=None) -> None:
         super().__init__()
         k = np.sqrt(1/nin)
-        self.w = Tensor(np.random.uniform(-k, k, (nout, nin)))
+        self.w = Tensor(np.random.uniform(-k, k, (nin, nout)))
         
         if bias:
-            self.b = Tensor(np.random.uniform(-k, k, (1,nout)))
+            self.b = Tensor(np.random.uniform(-k, k, (nout,)))
         self.bias = bias
         self.nonlin = nonlin
     
     def __call__(self, x):
         if self.bias:
-            act = x @ self.w.transpose() + self.b
+            act = x.dot(self.w) + self.b
         else:
-            act = x @ self.w.transpose()
+            act = x.dot(self.w)
         return getattr(act, self.nonlin)() if self.nonlin else act
         #return act.relu() if self.nonlin else act
     
@@ -1092,17 +1086,9 @@ def vanilla_rnn(x, h0, Wx, Wh, b):
     return Tensor.concatenate(seq).reshape((N,T,H))
     
     
-
     
-def softmax(logits):
-    # logits is a 2D Tensor
-    # each row is one sample, each column is one feature
-    logits -= logits.max(axis=1)
-    # logits -= logits.max(axis=1,keepdims=True)
-    ex = logits.exp()
-    ex_sum = ex.sum(axis=1, keepdims=True)
-    sigma = ex / ex_sum
-    return sigma
+def softmax(logits, axis=-1):
+    return logits.softmax(axis=axis)
 
 def log_softmax(logits):
     return logits / logits.exp().sum(axis=1,keepdims=True).log()

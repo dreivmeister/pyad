@@ -66,8 +66,8 @@ class Adam(Optimizer):
         self.t += 1
         
         for i,p in enumerate(self.parameters):
-            self.m[i] = self.beta1 * self.m[i] + (1-self.beta1) * p.gradient
-            self.v[i] = self.beta2 * self.v[i] + (1-self.beta2) * (p.gradient**2)
+            self.m[i] = self.beta1 * self.m[i] + (1-self.beta1) * p.grad
+            self.v[i] = self.beta2 * self.v[i] + (1-self.beta2) * (p.grad**2)
             
             m_hat = self.m[i] / (1-(self.beta1**self.t))
             v_hat = self.v[i] / (1-(self.beta2**self.t))
