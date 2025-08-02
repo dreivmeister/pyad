@@ -1,7 +1,7 @@
 import numpy as np
 from math import prod
 from scipy import signal
-from graphviz import Digraph
+#from graphviz import Digraph
 
 # helpers
 def shape_to_axis(old_shape, new_shape):
@@ -28,7 +28,7 @@ def transpose_last_two(shape):
     return list(range(len(shape)-2))+[-1, -2]
 
 
-class Tensor:
+class Tensor:    
     def __init__(self, data, prev=(), op=lambda x: None, name=None, *args, **kwargs):
         self.data = np.asarray(data, dtype=np.float64)
         self.prev = prev
@@ -186,8 +186,34 @@ class Tensor:
         other = other if isinstance(other, Tensor) else Tensor(other)
         out = Tensor(self.data + other.data, (self, other), op=self.__add__)
         def grad_fn(gradient):
-            self.grad = self.grad + gradient #if self.broadcast_dim is None else gradient.sum(axis=self.broadcast_dim, keepdims=True)
-            other.grad = other.grad + gradient #if other.broadcast_dim is None else gradient.sum(axis=other.broadcast_dim, keepdims=True)
+            # Gradient w.r.t. self
+            grad_self = gradient
+            if grad_self.shape != self.data.shape: # did broadcasting happen?
+                if self.data.shape == (): # or self.data.shape == (1,): # yes, from a scalar then sum everything
+                    grad_self = grad_self.sum()
+                else: # yes, from a broadcasted array then sum over broadcasted axes
+                    axes = tuple(i for i, (s, o) in enumerate(zip(self.data.shape[::-1], grad_self.shape[::-1])) if s == 1 and o > 1)
+                    if axes:
+                        axes = tuple(grad_self.ndim - 1 - ax for ax in axes)
+                        grad_self = grad_self.sum(axis=axes, keepdims=True)
+                    # Only reshape if total size matches
+                    if grad_self.size == np.prod(self.data.shape):
+                        grad_self = grad_self.reshape(self.data.shape)
+            self.grad = self.grad + grad_self
+
+            # Gradient w.r.t. other
+            grad_other = gradient
+            if grad_other.shape != other.data.shape:
+                if other.data.shape == ():# or other.data.shape == (1,):
+                    grad_other = grad_other.sum()
+                else:
+                    axes = tuple(i for i, (s, o) in enumerate(zip(other.data.shape[::-1], grad_other.shape[::-1])) if s == 1 and o > 1)
+                    if axes:
+                        axes = tuple(grad_other.ndim - 1 - ax for ax in axes)
+                        grad_other = grad_other.sum(axis=axes, keepdims=True)
+                    if grad_other.size == np.prod(other.data.shape):
+                        grad_other = grad_other.reshape(other.data.shape)
+            other.grad = other.grad + grad_other
         out.grad_fn = grad_fn
         return out
     
@@ -203,16 +229,34 @@ class Tensor:
     def __mul__(self, other):
         other = other if isinstance(other, Tensor) else Tensor(other)
         out = Tensor(self.data * other.data, (self, other), op=self.__mul__)
+
         def grad_fn(gradient):
-            # if self.data.ndim == 0: # scalar * vector
-            #     self.grad = self.grad + np.dot(gradient, other.data)
-            # else:
-            self.grad = self.grad + gradient * other.data
-            
-            # if other.data.ndim == 0: # vector * scalar
-            #     other.grad = other.grad + np.dot(gradient, self.data)
-            # else:
-            other.grad = other.grad + gradient * self.data
+            # Gradient w.r.t. self
+            grad_self = gradient * other.data                
+            if grad_self.shape != self.data.shape:
+                if self.data.shape == ():  # scalar
+                    grad_self = grad_self.sum()
+                else:
+                    axes = tuple(i for i, (s, o) in enumerate(zip(self.data.shape[::-1], grad_self.shape[::-1])) if s == 1 and o > 1)
+                    if axes:
+                        axes = tuple(grad_self.ndim - 1 - ax for ax in axes)
+                        grad_self = grad_self.sum(axis=axes, keepdims=True)
+                    grad_self = grad_self.reshape(self.data.shape)
+            self.grad += grad_self
+
+            # Gradient w.r.t. other
+            grad_other = gradient * self.data
+            if grad_other.shape != other.data.shape:
+                if other.data.shape == ():  # scalar
+                    grad_other = grad_other.sum()
+                else:
+                    axes = tuple(i for i, (s, o) in enumerate(zip(other.data.shape[::-1], grad_other.shape[::-1])) if s == 1 and o > 1)
+                    if axes:
+                        axes = tuple(grad_other.ndim - 1 - ax for ax in axes)
+                        grad_other = grad_other.sum(axis=axes, keepdims=True)
+                    grad_other = grad_other.reshape(other.data.shape)
+            other.grad += grad_other
+
         out.grad_fn = grad_fn
         return out
     
@@ -494,6 +538,21 @@ class Tensor:
         out.grad_fn = grad_fn
         
         return out
+    
+    def linear(self, weight, bias=None):
+        # self: (batch, in_features), weight: (in_features, out_features), bias: (out_features,)
+        out = Tensor(self.data @ weight.data + (bias.data if bias is not None else 0), (self, weight, bias) if bias is not None else (self, weight), op=Tensor.linear)
+        def grad_fn(gradient):
+            # gradient: (batch, out_features)
+            # dL/dx = gradient @ w.T
+            self.grad += gradient @ weight.data.T
+            # dL/dw = x.T @ gradient
+            weight.grad += self.data.T @ gradient
+            if bias is not None:
+                # dL/db = sum over batch axis
+                bias.grad += gradient.sum(axis=0)
+        out.grad_fn = grad_fn
+        return out
 
     def conv2d(self, kernels, bias=True):
         # only stride=1 and valid padding
@@ -638,7 +697,159 @@ class Module:
     
     def parameters(self):
         return []
+
+class LinearLayer(Module):
+    def __init__(self, nin, nout, bias=True, nonlin=None) -> None:
+        super().__init__()
+        k = np.sqrt(1/nin)
+        self.W = Tensor(np.random.uniform(-k, k, (nin, nout)))
+        self.bias = bias
+        if bias:
+            self.b = Tensor(np.random.uniform(-k, k, (nout,)))
+        else:
+            self.b = None
+        self.nonlin = nonlin
+
+    def __call__(self, x):
+        act = x.linear(self.W, self.b) if self.bias else x.linear(self.W)
+        return getattr(act, self.nonlin)() if self.nonlin else act
+
+    def parameters(self):
+        if self.bias:
+            return [self.W, self.b]
+        else:
+            return [self.W]
+        
+class MLP(Module):
+    def __init__(self, nin, nouts, nonlin='relu') -> None:
+        super().__init__()
+        # nin is an integer
+        # nouts is a list of integers
+        sizes = [nin] + nouts
+        self.layers = []
+        for i in range(len(nouts)):
+            if i != len(nouts)-1:
+                self.layers.append(LinearLayer(sizes[i],sizes[i+1],nonlin=nonlin))
+            else:
+                self.layers.append(LinearLayer(sizes[i],sizes[i+1],nonlin=False))
     
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+    
+    def parameters(self):
+        return [p for layer in self.layers for p in layer.parameters()]
+    
+class Conv2d(Module):
+    # only valid only stride 1
+    def __init__(self, input_shape, kernel_size, num_filters, bias=True):
+        super().__init__()
+        # input_shape - shape of input image (batch_size, channel_dim, height, width)
+        # kernel_size - square kernel size only, int
+        # depth - num of kernels, num of channels in output image
+        batch_size, in_channels, input_height, input_width = input_shape
+        #self.output_shape = (batch_size, num_filters, input_height - kernel_size + 1, input_width - kernel_size + 1)
+        kernels_shape = (num_filters, in_channels, kernel_size, kernel_size)
+        self.bias = bias
+        
+        self.kernels = Tensor(np.random.randn(*kernels_shape))
+    def __call__(self, x):
+        # x is a Tensor of shape (batch_size, channel_dim, height, width)
+        # output is a Tensor of shape (batch_size, num_filters, height - kernel_size + 1, width - kernel_size + 1)
+        return x.conv2d(self.kernels, bias=self.bias)
+    
+    def parameters(self):
+        return [self.kernels]
+    
+class MaxPool2d(Module):
+    
+    def __init__(self, kernel_size, stride):
+        if isinstance(kernel_size, int):
+            self.kernel_height = self.kernel_width = kernel_size
+        elif isinstance(kernel_size, tuple):
+            self.kernel_height, self.kernel_width = kernel_size
+        
+        self.stride = stride
+        
+    def __call__(self, x):
+        # x is (N,C,H,W)
+        return x.maxpool2d(self.kernel_height, self.kernel_width, self.stride)
+
+    def parameters(self):
+        return []
+    
+# class MultiHeadAttention(Module):
+#     def __init__(self, h, d_model, T, mask=False):
+#         # maybe dont need T
+#         self.h = h # num heads
+#         self.d_model = d_model # embedding dim
+#         self.T = T # sequence length
+#         self.d_k = self.d_v = int(d_model/h) #dimension key,value
+#         self.mask = None
+#         if mask:
+#             # gen mask
+#             # shape might be wrong
+#             m = np.zeros((self.d_model,self.d_model))
+#             m[np.triu_indices(self.d_model,1)] = -np.inf
+#             self.mask = Tensor(m)
+        
+#         # one list of three matrices for each head
+#         self.weights_heads = []
+#         for i in range(h):
+#             k = np.sqrt(1/self.d_k)
+#             # for each head
+#             #nin - number of columns
+#             #nout - number of rows
+            
+#             weights_headi = [Tensor(np.random.uniform(-k, k, (self.d_model, self.d_k))),
+#                              Tensor(np.random.uniform(-k, k, (self.d_model, self.d_k))),
+#                              Tensor(np.random.uniform(-k, k, (self.d_model, self.d_v)))]
+#             # weights_headi = [Wi^Q,Wi^K,Wi^V]
+#             self.weights_heads.append(weights_headi)
+        
+#         # output linear projection
+#         self.W_O = Tensor(np.random.uniform(-k, k, (int(self.h*self.d_v), self.d_model)))
+        
+    
+#     def __call__(self, Q, K, V):
+        
+#         head_attentions = []
+#         for i in range(self.h):
+#             WQ = self.weights_heads[i][0]
+#             WK = self.weights_heads[i][1]
+#             WV = self.weights_heads[i][2]
+#             head_attentions.append(Attention(Q @ WQ, K @ WK, V @ WV, self.mask))
+            
+#         concated_heads = Tensor.concatenate(head_attentions,axis=1)
+#         lin_proj_concated_heads = concated_heads @ self.W_O
+        
+#         return lin_proj_concated_heads
+    
+#     def parameters(self):
+#         return [self.W_O] + [mat for head in self.weights_heads for mat in head]
+
+class FeedForward(Module):
+    def __init__(self, n_embd):
+        self.ll1 = LinearLayer(n_embd, 4*n_embd, nonlin='relu')
+        self.ll2 = LinearLayer(4*n_embd, n_embd)
+        self.drop = Dropout(0.5)
+    
+    def __call__(self, x):
+        return self.drop(self.ll2(self.ll1(x)))
+    
+    def parameters(self):
+        return [*self.ll1.parameters(), *self.ll2.parameters()]
+    
+class Dropout(Module):
+    def __init__(self, p_drop) -> None:
+        self.p_drop = p_drop
+    
+    def __call__(self, x, training=True):
+        return x.dropout(self.p_drop, training)
+    
+    def parameters(self):
+        return []
     
 class Head(Module):
     def __init__(self, block_size, n_embd, head_size, dropout=0.2, mask=False):
@@ -671,137 +882,6 @@ class Head(Module):
     def parameters(self):
         return [*self.key.parameters(),*self.query.parameters(),*self.value.parameters()]
 
-class FeedForward(Module):
-    
-    def __init__(self, n_embd):
-        self.ll1 = LinearLayer(n_embd, 4*n_embd,nonlin='relu')
-        self.ll2 = LinearLayer(4*n_embd, n_embd)
-        self.drop = Dropout(0.5)
-    
-    def __call__(self, x):
-        return self.drop(self.ll2(self.ll1(x)))
-    
-    def parameters(self):
-        return [*self.ll1.parameters(), *self.ll2.parameters()]
-
-class LinearLayer(Module):
-    
-    def __init__(self, nin, nout, bias=True, nonlin=None) -> None:
-        super().__init__()
-        k = np.sqrt(1/nin)
-        self.w = Tensor(np.random.uniform(-k, k, (nin, nout)))
-        
-        if bias:
-            self.b = Tensor(np.random.uniform(-k, k, (nout,)))
-        self.bias = bias
-        self.nonlin = nonlin
-    
-    def __call__(self, x):
-        if self.bias:
-            act = x.dot(self.w) + self.b
-        else:
-            act = x.dot(self.w)
-        return getattr(act, self.nonlin)() if self.nonlin else act
-        #return act.relu() if self.nonlin else act
-    
-    def parameters(self):
-        if self.bias:
-            return [self.w, self.b]
-        else:
-            return [self.w]
-
-class LogisticLayer(Module):
-    
-    def __init__(self, nfeat, bias=False) -> None:
-        super().__init__()
-        self.l = LinearLayer(nfeat, nfeat, bias=bias, nonlin='sigmoid')
-    
-    def __call__(self, x):
-        return self.l(x)
-    
-    def parameters(self):
-        # or: return [*self.l.parameters()]
-        return [p for p in self.l.parameters()]
-    
-    
-class Convolution(Module):
-    # only valid only stride 1
-    
-    def __init__(self, input_shape, kernel_size, num_filters) -> None:
-        super().__init__()
-        # input_shape - shape of input image (batch_size, channel_dim, height, width)
-        # kernel_size - square kernel size only, int
-        # depth - num of kernels, num of channels in output image
-        batch_size, in_channels, input_height, input_width = input_shape
-        self.num_filters = num_filters # num of kernels
-        self.input_shape = input_shape
-        self.input_depth = in_channels
-        self.output_shape = (batch_size, num_filters, input_height - kernel_size + 1, input_width - kernel_size + 1)
-        self.kernels_shape = (num_filters, in_channels, kernel_size, kernel_size)
-        
-        self.kernels = Tensor(np.random.randn(*self.kernels_shape))
-    def __call__(self, x):
-        # x is a Tensor of shape (batch_size, channel_dim, height, width)
-        #out = Tensor(np.copy(self.bias))
-        return x.conv2d(self.kernels, self.output_shape)
-    
-    def parameters(self):
-        return [self.kernels]
-    
-class MultiHeadAttention(Module):
-    
-    def __init__(self, h, d_model, T, mask=False):
-        # maybe dont need T
-        self.h = h # num heads
-        self.d_model = d_model # embedding dim
-        self.T = T # sequence length
-        self.d_k = self.d_v = int(d_model/h) #dimension key,value
-        self.mask = None
-        if mask:
-            # gen mask
-            # shape might be wrong
-            m = np.zeros((self.d_model,self.d_model))
-            m[np.triu_indices(self.d_model,1)] = -np.inf
-            self.mask = Tensor(m)
-            
-        
-        # one list of three matrices for each head
-        self.weights_heads = []
-        for i in range(h):
-            k = np.sqrt(1/self.d_k)
-            # for each head
-            #nin - number of columns
-            #nout - number of rows
-            
-            weights_headi = [Tensor(np.random.uniform(-k, k, (self.d_model, self.d_k))),
-                             Tensor(np.random.uniform(-k, k, (self.d_model, self.d_k))),
-                             Tensor(np.random.uniform(-k, k, (self.d_model, self.d_v)))]
-            # weights_headi = [Wi^Q,Wi^K,Wi^V]
-            self.weights_heads.append(weights_headi)
-        
-        # output linear projection
-        self.W_O = Tensor(np.random.uniform(-k, k, (int(self.h*self.d_v), self.d_model)))
-        
-    
-    def __call__(self, Q, K, V):
-        
-        head_attentions = []
-        for i in range(self.h):
-            WQ = self.weights_heads[i][0]
-            WK = self.weights_heads[i][1]
-            WV = self.weights_heads[i][2]
-            head_attentions.append(Attention(Q @ WQ, K @ WK, V @ WV, self.mask))
-            
-        concated_heads = Tensor.concatenate(head_attentions,axis=1)
-        lin_proj_concated_heads = concated_heads @ self.W_O
-        
-        return lin_proj_concated_heads
-    
-    def parameters(self):
-        return [self.W_O] + [mat for head in self.weights_heads for mat in head]
-    
-    
-
 class MHA(Module):
     
     def __init__(self, block_size, n_embd, num_heads, head_size, dropout=0.5, do_mask=False):
@@ -818,15 +898,25 @@ class MHA(Module):
         return [*self.proj.parameters()] + [p for head in self.heads for p in head.parameters()]
     
     
-class Dropout(Module):
-    def __init__(self, p_drop) -> None:
-        self.p_drop = p_drop
-    
-    def __call__(self, x, training=True):
-        return x.dropout(self.p_drop, training)
+class Block(Module):
+    def __init__(self, block_size, n_embd, num_heads, dropout=0.5, do_mask=False):
+        # block_size - context_length - length of sample
+        # n_embd - embedding_dimension - d_model
+        # num_heads - number of heads in MHA
+        # head_size - embedding dimension in single head
+        head_size = n_embd // num_heads
+        self.sa = MHA(block_size,n_embd,num_heads,head_size,dropout,do_mask)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = LayerNorm(n_embd)
+        self.ln2 = LayerNorm(n_embd)
+        
+    def __call__(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
     
     def parameters(self):
-        return []
+        return [*self.sa.parameters(),*self.ln1.parameters(),*self.ln2.parameters(),*self.ffwd.parameters()]
     
 class BatchNorm1D(Module):
     #https://github.com/renan-cunha/BatchNormalization/blob/master/src/feed_forward/layers.py
@@ -862,7 +952,48 @@ class BatchNorm1D(Module):
     
     def parameters(self):
         return [self.gamma, self.beta]
+    
+class LayerNorm(Module):
+    # input of shape (N,D)
+    # or other i think
+    def __init__(self, normalized_shape):
+        # normalized_shape is equivalent to num_features for input in form (N,num_features)
+        if isinstance(normalized_shape, int):
+            self.normalized_shape = (normalized_shape,)
+        elif isinstance(normalized_shape, tuple):
+            self.normalized_shape = normalized_shape
         
+        # i think this is correct but might not be
+        self.axis_tuple = tuple([i for i in range(1, len(self.normalized_shape)+1)])
+        
+        self.gamma = Tensor.ones(normalized_shape)
+        self.beta = Tensor.zeros(normalized_shape)
+        
+    def __call__(self, x):
+        # x is of shape normalized_shape
+        m = Tensor.mean(x, axis=self.axis_tuple, keepdims=True)
+        v = Tensor.var(x, m, axis=self.axis_tuple, keepdims=True) + 1e-5
+        
+        return ((x - m)/v.sqrt())*self.gamma + self.beta
+        
+        
+    def parameters(self):
+        return [self.gamma, self.beta]   
+        
+        
+    
+class LogisticLayer(Module):
+    def __init__(self, nfeat, bias=False) -> None:
+        super().__init__()
+        self.l = LinearLayer(nfeat, nfeat, bias=bias, nonlin='sigmoid')
+    
+    def __call__(self, x):
+        return self.l(x)
+    
+    def parameters(self):
+        # or: return [*self.l.parameters()]
+        return [p for p in self.l.parameters()]
+    
 
 class TemporalAffine(Module):
     """
@@ -927,124 +1058,6 @@ class VanillaRNNBlock(Module):
     
     def parameters(self):
         return [self.Wx, self.Wh, self.b]
-    
-
-class MLP(Module):
-    def __init__(self, nin, nouts, nonlin='relu') -> None:
-        super().__init__()
-        # nin is an integer
-        # nouts is a list of integers
-        sizes = [nin] + nouts
-        self.layers = []
-        for i in range(len(nouts)):
-            if i != len(nouts)-1:
-                self.layers.append(LinearLayer(sizes[i],sizes[i+1],nonlin=nonlin))
-            else:
-                self.layers.append(LinearLayer(sizes[i],sizes[i+1],nonlin=False))
-    
-    def __call__(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-    
-    def parameters(self):
-        return [p for layer in self.layers for p in layer.parameters()]
-    
-    
-class LayerNorm(Module):
-    # input of shape (N,D)
-    # or other i think
-    def __init__(self, normalized_shape):
-        # normalized_shape is equivalent to num_features for input in form (N,num_features)
-        if isinstance(normalized_shape, int):
-            self.normalized_shape = (normalized_shape,)
-        elif isinstance(normalized_shape, tuple):
-            self.normalized_shape = normalized_shape
-        
-        # i think this is correct but might not be
-        self.axis_tuple = tuple([i for i in range(1, len(self.normalized_shape)+1)])
-        
-        self.gamma = Tensor.ones(normalized_shape)
-        self.beta = Tensor.zeros(normalized_shape)
-        
-    def __call__(self, x):
-        # x is of shape normalized_shape
-        m = Tensor.mean(x, axis=self.axis_tuple, keepdims=True)
-        v = Tensor.var(x, m, axis=self.axis_tuple, keepdims=True) + 1e-5
-        
-        return ((x - m)/v.sqrt())*self.gamma + self.beta
-        
-        
-    def parameters(self):
-        return [self.gamma, self.beta]
-    
-    
-#TODO: make Conv2d more flexible (stride,pad,...) and maybe faster
-class Conv2d(Module):
-    # only valid only stride 1
-    def __init__(self, in_channels, out_channels, kernel_size):
-        # input_shape - shape of input image (batch_size, channel_dim, height, width)
-        # kernel_size - square kernel size only, int
-        # depth - num of kernels, num of channels in output image
-        #batch_size, in_channels, input_height, input_width = input_shape
-        self.kernel_size = kernel_size
-        #self.num_filters = out_channels # num of kernels
-        #self.input_shape = input_shape
-        self.input_depth = in_channels
-        self.num_filters = out_channels
-        #self.output_shape = (batch_size, num_filters, input_height - kernel_size + 1, input_width - kernel_size + 1)
-        self.kernels_shape = (out_channels, in_channels, kernel_size, kernel_size)
-        
-        self.kernels = Tensor.rand(self.kernels_shape)
-        #self.kernels = Tensor(np.random.randn(*self.kernels_shape))
-    def __call__(self, x):
-        # x is a Tensor of shape (batch_size, channel_dim, height, width)
-        #out = Tensor(np.copy(self.bias))
-        output_shape = (x.shape[0],self.num_filters,x.shape[2]-self.kernel_size+1,x.shape[3]-self.kernel_size+1)
-        return x.conv2d(self.kernels, output_shape)
-    
-    def parameters(self):
-        return [self.kernels]
-    
-class MaxPool2d(Module):
-    
-    def __init__(self, kernel_size, stride):
-        if isinstance(kernel_size, int):
-            self.kernel_height = self.kernel_width = kernel_size
-        elif isinstance(kernel_size, tuple):
-            self.kernel_height, self.kernel_width = kernel_size
-        
-        self.stride = stride
-        
-    def __call__(self, x):
-        # x is (N,C,H,W)
-        return x.maxpool2d(self.kernel_height, self.kernel_width, self.stride)
-
-    def parameters(self):
-        return []
-    
-class Block(Module):
-    def __init__(self, block_size, n_embd, num_heads, dropout=0.5, do_mask=False):
-        # block_size - context_length - length of sample
-        # n_embd - embedding_dimension - d_model
-        # num_heads - number of heads in MHA
-        # head_size - embedding dimension in single head
-        head_size = n_embd // num_heads
-        self.sa = MHA(block_size,n_embd,num_heads,head_size,dropout,do_mask)
-        self.ffwd = FeedForward(n_embd)
-        self.ln1 = LayerNorm(n_embd)
-        self.ln2 = LayerNorm(n_embd)
-        
-    def __call__(self, x):
-        x = x + self.sa(self.ln1(x))
-        x = x + self.ffwd(self.ln2(x))
-        return x
-    
-    def parameters(self):
-        return [*self.sa.parameters(),*self.ln1.parameters(),*self.ln2.parameters(),*self.ffwd.parameters()]
-        
-        
-
 
 def vanilla_rnn_step(x, prev_h, Wx, Wh, b):
     #https://github.com/jariasf/CS231n/blob/master/assignment3/cs231n/rnn_layers.py

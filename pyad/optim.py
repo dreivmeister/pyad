@@ -2,6 +2,10 @@ import numpy as np
 
 
 class Optimizer:
+    def zero_grad(self):
+        for p in self.parameters:
+            p.grad = np.zeros_like(p.data)
+            
     def step(self):
         pass
     
@@ -37,15 +41,8 @@ class SGD(Optimizer):
                     p.grad = p.grad + self.momentum*self.v[i]
                 else:
                     p.grad = self.v[i]
-            
-            # this is wrong!!!!!!!!!!!!
-            # wrong shape gets broadcasted
-            # appears in batchnorm and layernorm
-            # pretty bad -> always have to use same batch size in testing and training
-            # dont know how to fix it properly
-            p.data = p.data - self.lr * p.grad
-            # p.data = p.data - self.lr * p.grad.sum(axis=0)
-            # would fix it but feel like it has significant impact on performance
+
+            p.data -= self.lr * p.grad
 
 class Adam(Optimizer):
     
@@ -72,7 +69,7 @@ class Adam(Optimizer):
             m_hat = self.m[i] / (1-(self.beta1**self.t))
             v_hat = self.v[i] / (1-(self.beta2**self.t))
             
-            p.data = p.data - self.alpha * m_hat/(np.sqrt(v_hat) + 10e-8)
+            p.data -= self.alpha * m_hat/(np.sqrt(v_hat) + 10e-8)
             
 class AdamW(Optimizer):
     
@@ -108,9 +105,9 @@ class AdamW(Optimizer):
             
             if self.amsgrad:
                 self.v_max[i] = np.maximum(self.v_max[i],v_hat)
-                p.data = p.data - self.lr*m_hat/(np.sqrt(self.v_max[i]) + 10e-8)    
+                p.data -= self.lr*m_hat/(np.sqrt(self.v_max[i]) + 10e-8)    
             else:
-                p.data = p.data - self.lr * m_hat/(np.sqrt(v_hat) + 10e-8)            
+                p.data -= self.lr * m_hat/(np.sqrt(v_hat) + 10e-8)
 
             
 class AdaMax(Optimizer):
@@ -134,5 +131,5 @@ class AdaMax(Optimizer):
         for i,p in enumerate(self.parameters):
             self.m[i] = self.beta1 * self.m[i] + (1-self.beta1) * p.grad
             self.u[i] = np.maximum(self.beta2 * self.u[i], np.abs(p.grad) + 10e-8)
-            
-            p.data = p.data - (self.alpha/(1-(self.beta1**self.t))) * (self.m[i]/(self.u[i]))
+
+            p.data -= (self.alpha/(1-(self.beta1**self.t))) * (self.m[i]/(self.u[i]))

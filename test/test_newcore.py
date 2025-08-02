@@ -357,7 +357,7 @@ def test_outer():
     
 def test_scalar_times_vector():
     # Forward test
-    x = Tensor(3.0)
+    x = Tensor([3.0])
     y = Tensor([4.0, 5.0, 6.0])
     z = y * x # x * y
 
@@ -365,7 +365,7 @@ def test_scalar_times_vector():
     z.sum().backward()
 
     # PyTorch comparison
-    xt = torch.tensor(3.0, dtype=torch.float64, requires_grad=True)
+    xt = torch.tensor([3.0], dtype=torch.float64, requires_grad=True)
     yt = torch.tensor([4.0, 5.0, 6.0], dtype=torch.float64, requires_grad=True)
     zt = xt * yt
     zt.sum().backward()
@@ -373,7 +373,6 @@ def test_scalar_times_vector():
     assert np.allclose(z.data, zt.detach().numpy())
     assert np.allclose(x.grad, xt.grad.numpy())
     assert np.allclose(y.grad, yt.grad.numpy())
-    
     
     x = Tensor([1.0, 2.0, 3.0])
     y = Tensor([4.0, 5.0, 6.0])
@@ -576,31 +575,93 @@ from pyad.new_core import MLP
 from pyad.optim import Adam
 def test_mlp_xor():
     # XOR dataset
-    X_np = Tensor(np.array([[0,0],[0,1],[1,0],[1,1]], dtype=np.float64))
-    y_np = Tensor(np.array([[0],[1],[1],[0]], dtype=np.float64))
-    print(X_np.shape, y_np.shape)
+    X = Tensor(np.array([[0,0],[0,1],[1,0],[1,1]], dtype=np.float64))
+    y = Tensor(np.array([[0],[1],[1],[0]], dtype=np.float64))
 
-    # # Convert to Tensor
-    # X = [Tensor(x) for x in X_np]
-    # y = [Tensor(t) for t in y_np]
-
-    mlp = MLP(2, [16, 1], nonlin='tanh')
+    mlp = MLP(2, [16, 1], nonlin='relu')
     optim = Adam(mlp.parameters())    
 
-    for epoch in range(300):
-        total_loss = 0
-        mlp.zero_grad()
-        #for xi, yi in zip(X, y):
-        out = mlp(X_np)
-        loss = ((out - y_np) ** 2).sum()
+    for epoch in range(1000):
+        optim.zero_grad()
+        out = mlp(X)
+        loss = ((out - y) ** 2).sum()
         loss.backward()
-        total_loss += loss.data
         optim.step()
-        # if epoch % 100 == 0:
-        #     print(f"Epoch {epoch}, Loss: {total_loss}")
+        
 
     # Test predictions
-    preds = mlp(X_np)
-    print(((preds - y_np) ** 2).sum())
+    preds = mlp(X)
     # Should be close to [0, 1, 1, 0]
-    assert ((preds - y_np) ** 2).sum().data < 0.1
+    assert ((preds - y) ** 2).sum().data < 0.1
+    
+    X_test = Tensor(np.array([[0,0],[1,1]], dtype=np.float64))
+    preds_test = mlp(X_test)
+    assert ((preds_test - Tensor(np.array([[0],[0]], dtype=np.float64))) ** 2).sum().data < 0.1
+
+
+def test_mlp_xor_diff_batch():
+    # XOR dataset
+    X1 = Tensor(np.array([[0,0],[0,1],[1,0],[1,1]], dtype=np.float64))
+    X2 = Tensor(np.array([[0,0],[1,1]], dtype=np.float64))
+    y = Tensor(np.array([[0],[1],[1],[0]], dtype=np.float64))
+
+    mlp = MLP(2, [5, 1], nonlin='relu')
+    optim = Adam(mlp.parameters())    
+
+    optim.zero_grad()
+    
+    out1 = mlp(X1)
+    loss1 = ((out1 - y) ** 2).sum()
+    loss1.backward()
+    optim.step()
+    
+    optim.zero_grad()
+    
+    out2 = mlp(X2)
+    loss2 = ((out2 - Tensor(np.array([[0],[0]], dtype=np.float64))) ** 2).sum()
+    loss2.backward()
+
+def test_linear_layer_against_pytorch():
+    import torch
+    import numpy as np
+    from pyad.new_core import Tensor, LinearLayer
+
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    torch.manual_seed(42)
+
+    batch_size = 4
+    in_features = 3
+    out_features = 2
+
+    # Random input and weights
+    x_np = np.random.randn(batch_size, in_features)
+    w_np = np.random.randn(in_features, out_features)
+    b_np = np.random.randn(out_features)
+
+    # PyAD tensors
+    x = Tensor(x_np)
+    w = Tensor(w_np)
+    b = Tensor(b_np)
+
+    # Forward pass (PyAD)
+    y = x.linear(w, b)
+    loss = y.sum()
+    loss.backward()
+
+    # PyTorch tensors
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    wt = torch.tensor(w_np, dtype=torch.float64, requires_grad=True)
+    bt = torch.tensor(b_np, dtype=torch.float64, requires_grad=True)
+
+    # Forward pass (PyTorch)
+    yt = xt @ wt + bt
+    loss_t = yt.sum()
+    loss_t.backward()
+
+    # Compare outputs
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6)
+    # Compare gradients
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
+    assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-6)
+    assert np.allclose(b.grad, bt.grad.numpy(), atol=1e-6)
