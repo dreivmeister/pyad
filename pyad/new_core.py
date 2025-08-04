@@ -188,32 +188,29 @@ class Tensor:
         def grad_fn(gradient):
             # Gradient w.r.t. self
             grad_self = gradient
-            if grad_self.shape != self.data.shape: # did broadcasting happen?
-                if self.data.shape == (): # or self.data.shape == (1,): # yes, from a scalar then sum everything
-                    grad_self = grad_self.sum()
-                else: # yes, from a broadcasted array then sum over broadcasted axes
-                    axes = tuple(i for i, (s, o) in enumerate(zip(self.data.shape[::-1], grad_self.shape[::-1])) if s == 1 and o > 1)
-                    if axes:
-                        axes = tuple(grad_self.ndim - 1 - ax for ax in axes)
-                        grad_self = grad_self.sum(axis=axes, keepdims=True)
-                    # Only reshape if total size matches
-                    if grad_self.size == np.prod(self.data.shape):
-                        grad_self = grad_self.reshape(self.data.shape)
-            self.grad = self.grad + grad_self
+            if grad_self.shape != self.data.shape:
+                s_shape = self.data.shape
+                g_shape = grad_self.shape
+                if len(s_shape) < len(g_shape):
+                    s_shape = (1,) * (len(g_shape) - len(s_shape)) + s_shape
+                axes = tuple(i for i, (s, g) in enumerate(zip(s_shape, g_shape)) if s == 1 and g > 1)
+                if axes:
+                    grad_self = grad_self.sum(axis=axes, keepdims=True)
+                grad_self = grad_self.reshape(self.data.shape)
+            self.grad += grad_self
 
             # Gradient w.r.t. other
             grad_other = gradient
             if grad_other.shape != other.data.shape:
-                if other.data.shape == ():# or other.data.shape == (1,):
-                    grad_other = grad_other.sum()
-                else:
-                    axes = tuple(i for i, (s, o) in enumerate(zip(other.data.shape[::-1], grad_other.shape[::-1])) if s == 1 and o > 1)
-                    if axes:
-                        axes = tuple(grad_other.ndim - 1 - ax for ax in axes)
-                        grad_other = grad_other.sum(axis=axes, keepdims=True)
-                    if grad_other.size == np.prod(other.data.shape):
-                        grad_other = grad_other.reshape(other.data.shape)
-            other.grad = other.grad + grad_other
+                o_shape = other.data.shape
+                g_shape = grad_other.shape
+                if len(o_shape) < len(g_shape):
+                    o_shape = (1,) * (len(g_shape) - len(o_shape)) + o_shape
+                axes = tuple(i for i, (s, g) in enumerate(zip(o_shape, g_shape)) if s == 1 and g > 1)
+                if axes:
+                    grad_other = grad_other.sum(axis=axes, keepdims=True)
+                grad_other = grad_other.reshape(other.data.shape)
+            other.grad += grad_other
         out.grad_fn = grad_fn
         return out
     
@@ -232,29 +229,29 @@ class Tensor:
 
         def grad_fn(gradient):
             # Gradient w.r.t. self
-            grad_self = gradient * other.data                
+            grad_self = gradient * other.data            
             if grad_self.shape != self.data.shape:
-                if self.data.shape == ():  # scalar
-                    grad_self = grad_self.sum()
-                else:
-                    axes = tuple(i for i, (s, o) in enumerate(zip(self.data.shape[::-1], grad_self.shape[::-1])) if s == 1 and o > 1)
-                    if axes:
-                        axes = tuple(grad_self.ndim - 1 - ax for ax in axes)
-                        grad_self = grad_self.sum(axis=axes, keepdims=True)
-                    grad_self = grad_self.reshape(self.data.shape)
+                s_shape = self.data.shape
+                g_shape = grad_self.shape
+                if len(s_shape) < len(g_shape):
+                    s_shape = (1,) * (len(g_shape) - len(s_shape)) + s_shape
+                axes = tuple(i for i, (s, g) in enumerate(zip(s_shape, g_shape)) if s == 1 and g > 1)
+                if axes:
+                    grad_self = grad_self.sum(axis=axes, keepdims=True)
+                grad_self = grad_self.reshape(self.data.shape)
             self.grad += grad_self
 
             # Gradient w.r.t. other
-            grad_other = gradient * self.data
+            grad_other = gradient * self.data                    
             if grad_other.shape != other.data.shape:
-                if other.data.shape == ():  # scalar
-                    grad_other = grad_other.sum()
-                else:
-                    axes = tuple(i for i, (s, o) in enumerate(zip(other.data.shape[::-1], grad_other.shape[::-1])) if s == 1 and o > 1)
-                    if axes:
-                        axes = tuple(grad_other.ndim - 1 - ax for ax in axes)
-                        grad_other = grad_other.sum(axis=axes, keepdims=True)
-                    grad_other = grad_other.reshape(other.data.shape)
+                o_shape = other.data.shape
+                g_shape = grad_other.shape
+                if len(o_shape) < len(g_shape):
+                    o_shape = (1,) * (len(g_shape) - len(o_shape)) + o_shape
+                axes = tuple(i for i, (s, g) in enumerate(zip(o_shape, g_shape)) if s == 1 and g > 1)
+                if axes:
+                    grad_other = grad_other.sum(axis=axes, keepdims=True)
+                grad_other = grad_other.reshape(other.data.shape)
             other.grad += grad_other
 
         out.grad_fn = grad_fn
@@ -268,7 +265,7 @@ class Tensor:
         out = Tensor(self.data ** other, (self,), op=self.__pow__)
         
         def grad_fn(gradient):
-            self.grad = self.grad + gradient * (other * (self.data ** (other-1)))
+            self.grad += gradient * (other * (self.data ** (other-1)))
         out.grad_fn = grad_fn
         
         return out
@@ -638,7 +635,6 @@ class Tensor:
         out = Tensor((1/2)*np.linalg.norm(self.data, ord=2)**2, (self,), op=self.l2)
         
         def grad_fn(gradient):
-            # could also do: self.grad += out.grad * self.data
             self.grad += gradient * self.data
         out.grad_fn = grad_fn
         
@@ -743,16 +739,15 @@ class MLP(Module):
     
 class Conv2d(Module):
     # only valid only stride 1
-    def __init__(self, input_shape, kernel_size, num_filters, bias=True):
+    def __init__(self, in_channels, out_channels, kernel_size, bias=True):
         super().__init__()
         # input_shape - shape of input image (batch_size, channel_dim, height, width)
         # kernel_size - square kernel size only, int
         # depth - num of kernels, num of channels in output image
-        batch_size, in_channels, input_height, input_width = input_shape
+        # out_channels is num_filters
         #self.output_shape = (batch_size, num_filters, input_height - kernel_size + 1, input_width - kernel_size + 1)
-        kernels_shape = (num_filters, in_channels, kernel_size, kernel_size)
+        kernels_shape = (out_channels, in_channels, kernel_size, kernel_size)
         self.bias = bias
-        
         self.kernels = Tensor(np.random.randn(*kernels_shape))
     def __call__(self, x):
         # x is a Tensor of shape (batch_size, channel_dim, height, width)
@@ -927,8 +922,6 @@ class BatchNorm1D(Module):
         self.eps = 1e-5
         self.momentum = momentum
         
-        
-        # not supported yet
         self.running_mean = Tensor(np.zeros(self.num_features))
         self.running_var = Tensor(np.ones(self.num_features))
         
@@ -971,29 +964,13 @@ class LayerNorm(Module):
         
     def __call__(self, x):
         # x is of shape normalized_shape
-        m = Tensor.mean(x, axis=self.axis_tuple, keepdims=True)
-        v = Tensor.var(x, m, axis=self.axis_tuple, keepdims=True) + 1e-5
-        
+        m = x.mean(axis=self.axis_tuple, keepdims=True)
+        v = x.var(axis=self.axis_tuple, keepdims=True) + 1e-5
+
         return ((x - m)/v.sqrt())*self.gamma + self.beta
-        
         
     def parameters(self):
         return [self.gamma, self.beta]   
-        
-        
-    
-class LogisticLayer(Module):
-    def __init__(self, nfeat, bias=False) -> None:
-        super().__init__()
-        self.l = LinearLayer(nfeat, nfeat, bias=bias, nonlin='sigmoid')
-    
-    def __call__(self, x):
-        return self.l(x)
-    
-    def parameters(self):
-        # or: return [*self.l.parameters()]
-        return [p for p in self.l.parameters()]
-    
 
 class TemporalAffine(Module):
     """
@@ -1103,20 +1080,37 @@ def vanilla_rnn(x, h0, Wx, Wh, b):
 def softmax(logits, axis=-1):
     return logits.softmax(axis=axis)
 
-def log_softmax(logits):
-    return logits / logits.exp().sum(axis=1,keepdims=True).log()
+def log_softmax(logits, axis=-1):
+    return softmax(logits, axis=axis).log()
 
 def l2_loss(preds, targets):
     # preds is a prediction vector
     # target contains the target values
     return (preds - targets).l2()
 
+def mse(preds, targets):
+    # preds is a prediction vector
+    # target contains the target values
+    return ((preds - targets)**2).mean()
+
 def negative_log_likelihood(probs, targets):
     # binary classification
     # preds is a probability vector
     # targets is a vector of zeros and ones
     label_probs = probs * targets + (1 - probs) * (1 - targets)
-    return -(label_probs.log().sum())
+    return -(label_probs.log().mean())
+
+def categorical_cross_entropy(logits, targets, eps=1e-8):
+    # multiclass classification
+    # logits vector is not a probability vector (columns dont sum to 1)
+    # logits: Tensor (batch, num_classes)
+    # targets: Tensor (batch, num_classes), one-hot
+    logits_max = logits.max(axis=1, keepdims=True)
+    exp_shifted = (logits - logits_max).exp()
+    log_sum_exp = exp_shifted.sum(axis=1, keepdims=True).log()
+    log_probs = logits - logits_max - log_sum_exp
+    loss = -(targets * log_probs).sum(axis=1).mean()
+    return loss
 
 def hinge_loss(logits, targets):
     # logits is not a prob vector (columns dont sum to 1)

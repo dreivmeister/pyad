@@ -46,9 +46,9 @@ class SGD(Optimizer):
 
 class Adam(Optimizer):
     
-    def __init__(self, parameters, alpha=0.001, beta1=0.9, beta2=0.999):
+    def __init__(self, parameters, lr=0.001, beta1=0.9, beta2=0.999):
         self.parameters = parameters
-        self.alpha = alpha
+        self.lr = lr
         self.beta1 = beta1
         self.beta2 = beta2
         
@@ -69,7 +69,7 @@ class Adam(Optimizer):
             m_hat = self.m[i] / (1-(self.beta1**self.t))
             v_hat = self.v[i] / (1-(self.beta2**self.t))
             
-            p.data -= self.alpha * m_hat/(np.sqrt(v_hat) + 10e-8)
+            p.data -= self.lr * m_hat/(np.sqrt(v_hat) + 10e-8)
             
 class AdamW(Optimizer):
     

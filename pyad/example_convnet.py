@@ -26,7 +26,6 @@ def small_convnet_example():
     optim = Adam([conv.kernels, fc.W, fc.b], alpha=0.001)
 
     for epoch in range(10):
-        optim.zero_grad()
         # Forward pass
         logits = forward(x)
 
@@ -35,6 +34,7 @@ def small_convnet_example():
         print('Epoch:', epoch, 'Loss:', loss.data)
 
         # Backward
+        optim.zero_grad()
         loss.backward()
         optim.step()
 

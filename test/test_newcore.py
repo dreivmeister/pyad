@@ -470,7 +470,6 @@ def test_softmax_against_torch():
     assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6)
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
     
-    
 def test_max_against_torch():
     # 1D case
     x_np = np.array([1.0, 3.0, 2.0, 5.0])
@@ -582,9 +581,9 @@ def test_mlp_xor():
     optim = Adam(mlp.parameters())    
 
     for epoch in range(1000):
-        optim.zero_grad()
         out = mlp(X)
         loss = ((out - y) ** 2).sum()
+        optim.zero_grad()
         loss.backward()
         optim.step()
         
@@ -665,3 +664,144 @@ def test_linear_layer_against_pytorch():
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
     assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-6)
     assert np.allclose(b.grad, bt.grad.numpy(), atol=1e-6)
+    
+    
+
+from pyad.new_core import log_softmax
+def test_log_softmax_against_torch():
+    x_np = np.random.randn(2, 3)
+    x = Tensor(x_np)
+    y = log_softmax(x, axis=1)
+    y.sum().backward()
+
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    yt = F.log_softmax(xt, dim=1)
+    yt.sum().backward()
+
+    print(y.data)
+    print(yt.detach().numpy())
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6)
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
+    
+    
+from pyad.new_core import categorical_cross_entropy
+def test_categorical_cross_entropy_against_torch():
+    np.random.seed(42)
+
+    batch_size = 5
+    num_classes = 4
+
+    # Random logits and integer labels
+    logits_np = np.random.randn(batch_size, num_classes)
+    labels_np = np.random.randint(0, num_classes, size=(batch_size,))
+    onehot_np = np.zeros((batch_size, num_classes), dtype=np.float64)
+    onehot_np[np.arange(batch_size), labels_np] = 1.0
+
+    # PyAD
+    logits = Tensor(logits_np)
+    targets = Tensor(onehot_np)
+    loss = categorical_cross_entropy(logits, targets)
+    loss.backward()
+
+    # PyTorch
+    logits_t = torch.tensor(logits_np, dtype=torch.float64, requires_grad=True)
+    labels_t = torch.tensor(labels_np, dtype=torch.long)
+    loss_t = F.cross_entropy(logits_t, labels_t)
+    loss_t.backward()
+
+    # Compare forward
+    assert np.allclose(loss.data, loss_t.detach().numpy(), atol=1e-6)
+    # Compare gradients
+    assert np.allclose(logits.grad, logits_t.grad.numpy(), atol=1e-6)
+
+from pyad.new_core import negative_log_likelihood    
+def test_negative_log_likelihood_against_torch():
+    import torch
+    import torch.nn.functional as F
+    np.random.seed(42)
+
+    batch_size = 8
+
+    # Random probabilities and binary targets
+    probs_np = np.clip(np.random.rand(batch_size, 1), 1e-6, 1-1e-6)  # Avoid log(0)
+    targets_np = np.random.randint(0, 2, size=(batch_size, 1)).astype(np.float64)
+
+    # PyAD
+    probs = Tensor(probs_np)
+    targets = Tensor(targets_np)
+    loss = negative_log_likelihood(probs, targets)
+    loss.backward()
+
+    # PyTorch
+    probs_t = torch.tensor(probs_np, dtype=torch.float64, requires_grad=True)
+    targets_t = torch.tensor(targets_np, dtype=torch.float64)
+    loss_t = F.binary_cross_entropy(probs_t, targets_t, reduction='mean')
+    loss_t.backward()
+
+    # Compare forward
+    assert np.allclose(loss.data, loss_t.detach().numpy(), atol=1e-6)
+    # Compare gradients
+    assert np.allclose(probs.grad, probs_t.grad.numpy(), atol=1e-6)
+    
+    
+from pyad.new_core import BatchNorm1D
+def test_batchnorm1d():
+    np.random.seed(42)
+
+    batch_size = 8
+    num_features = 5
+
+    # Random input
+    x_np = np.random.randn(batch_size, num_features)
+    x = Tensor(x_np)
+
+    # Your BatchNorm1D (training mode)
+    bn = BatchNorm1D(num_features)
+    y = bn(x, training=True)
+    y.sum().backward()
+
+    # PyTorch BatchNorm1d
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    bnt = torch.nn.BatchNorm1d(num_features, affine=True, track_running_stats=False).double()
+    # Copy gamma and beta
+    bnt.weight.data = torch.tensor(bn.gamma.data, dtype=torch.float64)
+    bnt.bias.data = torch.tensor(bn.beta.data, dtype=torch.float64)
+    yt = bnt(xt)
+    yt.sum().backward()
+
+    # Compare forward
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6), "Forward outputs do not match"
+    # Compare gradients
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), "Input gradients do not match"
+    assert np.allclose(bn.gamma.grad, bnt.weight.grad.numpy(), atol=1e-6), "Gamma gradients do not match"
+    assert np.allclose(bn.beta.grad, bnt.bias.grad.numpy(), atol=1e-6), "Beta gradients do not match"
+
+
+from pyad.new_core import LayerNorm
+def test_layernorm():
+    np.random.seed(42)
+
+    batch_size = 6
+    num_features = 4
+
+    # Random input
+    x_np = np.random.randn(batch_size, num_features)
+    x = Tensor(x_np)
+
+    # Your LayerNorm (assumes normalized_shape=num_features)
+    ln = LayerNorm(num_features)
+    y = ln(x)
+    y.sum().backward()
+
+    # PyTorch LayerNorm
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    lnt = torch.nn.LayerNorm(num_features, elementwise_affine=True).double()
+    yt = lnt(xt)
+    yt.sum().backward()
+
+    # Compare forward
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6), "Forward outputs do not match"
+    # Compare gradients
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), "Input gradients do not match"
+    assert np.allclose(ln.gamma.grad, lnt.weight.grad.numpy(), atol=1e-6), "Gamma gradients do not match"
+    assert np.allclose(ln.beta.grad, lnt.bias.grad.numpy(), atol=1e-6), "Beta gradients do not match"
