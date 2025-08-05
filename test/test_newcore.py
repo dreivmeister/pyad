@@ -805,3 +805,33 @@ def test_layernorm():
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), "Input gradients do not match"
     assert np.allclose(ln.gamma.grad, lnt.weight.grad.numpy(), atol=1e-6), "Gamma gradients do not match"
     assert np.allclose(ln.beta.grad, lnt.bias.grad.numpy(), atol=1e-6), "Beta gradients do not match"
+    
+    
+def test_layernorm_conv():
+    np.random.seed(42)
+
+    batch_size = 6
+    num_channels = 3
+    dim = 10
+
+    # Random input
+    x_np = np.random.randn(batch_size, num_channels, dim, dim)
+    x = Tensor(x_np)
+
+    # Your LayerNorm (assumes normalized_shape=num_features)
+    ln = LayerNorm((num_channels, dim, dim))
+    y = ln(x)
+    y.sum().backward()
+
+    # PyTorch LayerNorm
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    lnt = torch.nn.LayerNorm((num_channels, dim, dim), elementwise_affine=True).double()
+    yt = lnt(xt)
+    yt.sum().backward()
+
+    # Compare forward
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6), "Forward outputs do not match"
+    # Compare gradients
+    assert np.allclose(ln.gamma.grad, lnt.weight.grad.numpy(), atol=1e-6), "Gamma gradients do not match"
+    assert np.allclose(ln.beta.grad, lnt.bias.grad.numpy(), atol=1e-6), "Beta gradients do not match"
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), "Input gradients do not match"

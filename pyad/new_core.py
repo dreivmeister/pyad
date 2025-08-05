@@ -182,34 +182,33 @@ class Tensor:
     #     self.broadcast_dim = value.broadcast_dim
     #     self.name = value.name
     
+    @staticmethod
+    def checkbroadcast(a, grad_a):
+        if grad_a.shape != a.data.shape:
+            s_shape = a.data.shape
+            g_shape = grad_a.shape
+            if len(s_shape) < len(g_shape):
+                s_shape = (1,) * (len(g_shape) - len(s_shape)) + s_shape
+            axes = tuple(i for i, (s, g) in enumerate(zip(s_shape, g_shape)) if s == 1 and g > 1)
+            if axes:
+                grad_a = grad_a.sum(axis=axes, keepdims=True)
+            grad_a = grad_a.reshape(a.data.shape)
+        return grad_a
+
     def __add__(self, other):
         other = other if isinstance(other, Tensor) else Tensor(other)
         out = Tensor(self.data + other.data, (self, other), op=self.__add__)
         def grad_fn(gradient):
             # Gradient w.r.t. self
             grad_self = gradient
-            if grad_self.shape != self.data.shape:
-                s_shape = self.data.shape
-                g_shape = grad_self.shape
-                if len(s_shape) < len(g_shape):
-                    s_shape = (1,) * (len(g_shape) - len(s_shape)) + s_shape
-                axes = tuple(i for i, (s, g) in enumerate(zip(s_shape, g_shape)) if s == 1 and g > 1)
-                if axes:
-                    grad_self = grad_self.sum(axis=axes, keepdims=True)
-                grad_self = grad_self.reshape(self.data.shape)
+            # if shape mismatch, then self was broadcasted during the operation
+            # adjust grad_self accordingly
+            grad_self = Tensor.checkbroadcast(self, grad_self)
             self.grad += grad_self
 
             # Gradient w.r.t. other
             grad_other = gradient
-            if grad_other.shape != other.data.shape:
-                o_shape = other.data.shape
-                g_shape = grad_other.shape
-                if len(o_shape) < len(g_shape):
-                    o_shape = (1,) * (len(g_shape) - len(o_shape)) + o_shape
-                axes = tuple(i for i, (s, g) in enumerate(zip(o_shape, g_shape)) if s == 1 and g > 1)
-                if axes:
-                    grad_other = grad_other.sum(axis=axes, keepdims=True)
-                grad_other = grad_other.reshape(other.data.shape)
+            grad_other = Tensor.checkbroadcast(other, grad_other)
             other.grad += grad_other
         out.grad_fn = grad_fn
         return out
@@ -229,29 +228,13 @@ class Tensor:
 
         def grad_fn(gradient):
             # Gradient w.r.t. self
-            grad_self = gradient * other.data            
-            if grad_self.shape != self.data.shape:
-                s_shape = self.data.shape
-                g_shape = grad_self.shape
-                if len(s_shape) < len(g_shape):
-                    s_shape = (1,) * (len(g_shape) - len(s_shape)) + s_shape
-                axes = tuple(i for i, (s, g) in enumerate(zip(s_shape, g_shape)) if s == 1 and g > 1)
-                if axes:
-                    grad_self = grad_self.sum(axis=axes, keepdims=True)
-                grad_self = grad_self.reshape(self.data.shape)
+            grad_self = gradient * other.data
+            grad_self = Tensor.checkbroadcast(self, grad_self)
             self.grad += grad_self
 
             # Gradient w.r.t. other
-            grad_other = gradient * self.data                    
-            if grad_other.shape != other.data.shape:
-                o_shape = other.data.shape
-                g_shape = grad_other.shape
-                if len(o_shape) < len(g_shape):
-                    o_shape = (1,) * (len(g_shape) - len(o_shape)) + o_shape
-                axes = tuple(i for i, (s, g) in enumerate(zip(o_shape, g_shape)) if s == 1 and g > 1)
-                if axes:
-                    grad_other = grad_other.sum(axis=axes, keepdims=True)
-                grad_other = grad_other.reshape(other.data.shape)
+            grad_other = gradient * self.data
+            grad_other = Tensor.checkbroadcast(other, grad_other)
             other.grad += grad_other
 
         out.grad_fn = grad_fn
@@ -293,48 +276,44 @@ class Tensor:
     
     def mean(self, axis=None, keepdims=False):
         out = Tensor(np.mean(self.data, axis=axis, keepdims=keepdims), (self,), op=self.mean)
-        if axis == None:
+        # Compute n: number of elements reduced per output element
+        if axis is None:
             n = self.data.size
-        elif axis == 0:
-            n = self.data.shape[0]
+            axes = tuple(range(self.data.ndim))
         else:
-            n = self.data.shape[1]
-        
+            axes = axis if isinstance(axis, tuple) else (axis,)
+            n = np.prod([self.data.shape[ax] for ax in axes])
+
         def grad_fn(gradient):
-            if keepdims == False:
-                if axis == None or axis == 0:
-                    self.grad += gradient * np.ones_like(self.data)*(1./n)
-                if axis == 1:
-                    self.grad += gradient.T * np.ones_like(self.data)*(1./n)
-            else:
-                self.grad += gradient * np.ones_like(self.data)*(1./n)
-                
+            # Broadcast gradient to input shape
+            grad = gradient
+            if not keepdims and axis is not None:
+                # Insert singleton dims for reduced axes
+                for ax in sorted(axes):
+                    grad = np.expand_dims(grad, ax)
+            grad = np.ones_like(self.data) * grad / n
+            self.grad += grad
         out.grad_fn = grad_fn
-        
         return out
     
     def var(self, axis=None, keepdims=False):
         out = Tensor(np.var(self.data, axis=axis, keepdims=keepdims), (self,), op=self.var)
-        m = np.mean(self.data, axis=axis, keepdims=keepdims)
-        n = self.data.size
-        if axis == None:
+        m = np.mean(self.data, axis=axis, keepdims=True)
+        if axis is None:
             n = self.data.size
-        elif axis == 0:
-            n = self.data.shape[0]
+            axes = tuple(range(self.data.ndim))
         else:
-            n = self.data.shape[1]
-        
-        
+            axes = axis if isinstance(axis, tuple) else (axis,)
+            n = np.prod([self.data.shape[ax] for ax in axes])
+
         def grad_fn(gradient):
-            if keepdims == False:
-                if axis == None or axis == 0:
-                    self.grad += gradient * ((2./n)*(self.data - m))
-                if axis == 1:
-                    self.grad += gradient.T * ((2./n)*(self.data - np.expand_dims(m,axis=1)))
-            else:
-                self.grad += gradient * ((2./n)*(self.data - m))
+            grad = gradient
+            if not keepdims and axis is not None:
+                for ax in sorted(axes):
+                    grad = np.expand_dims(grad, ax)
+            grad = grad * (2.0 / n) * (self.data - m)
+            self.grad += grad
         out.grad_fn = grad_fn
-        
         return out
     
     def sin(self):
@@ -745,7 +724,7 @@ class Conv2d(Module):
         # kernel_size - square kernel size only, int
         # depth - num of kernels, num of channels in output image
         # out_channels is num_filters
-        #self.output_shape = (batch_size, num_filters, input_height - kernel_size + 1, input_width - kernel_size + 1)
+        #self.normalized_shape = (out_channels, input_height - kernel_size + 1, input_width - kernel_size + 1)
         kernels_shape = (out_channels, in_channels, kernel_size, kernel_size)
         self.bias = bias
         self.kernels = Tensor(np.random.randn(*kernels_shape))
