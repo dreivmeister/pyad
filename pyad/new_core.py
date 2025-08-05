@@ -530,36 +530,84 @@ class Tensor:
         out.grad_fn = grad_fn
         return out
 
-    def conv2d(self, kernels, bias=True):
-        # only stride=1 and valid padding
-        #https://github.com/TheIndependentCode/Neural-Network/blob/master/convolutional.py
-        # self is the input image
-        
-        out_channels, in_channels, kernel_size, kernel_size = kernels.shape
-        batch_size, in_channels, input_height, input_width = self.shape
-        output_shape = (batch_size, out_channels, input_height - kernel_size + 1, input_width - kernel_size + 1)
-        if bias:
-            out = np.random.randn(*output_shape)
+    def conv2d(self, kernels, stride=1, pad=0, bias=None):
+        # self: (batch_size, in_channels, input_height, input_width)
+        # kernels: (out_channels, in_channels, kernel_size, kernel_size)
+        out_channels, in_channels, kernel_size, _ = kernels.shape
+        batch_size, in_channels2, input_height, input_width = self.shape
+        assert in_channels == in_channels2, "Input and kernel in_channels must match"
+
+        # Pad input if needed
+        if pad > 0:
+            x_padded = np.pad(self.data, ((0,0), (0,0), (pad,pad), (pad,pad)), 'constant', constant_values=0)
         else:
-            out = np.zeros(output_shape)
-        
-        in_channels = self.shape[1]
+            x_padded = self.data
+
+        padded_height = x_padded.shape[2]
+        padded_width = x_padded.shape[3]
+
+        out_height = (padded_height - kernel_size) // stride + 1
+        out_width = (padded_width - kernel_size) // stride + 1
+        output_shape = (batch_size, out_channels, out_height, out_width)
+        out = np.zeros(output_shape)
+
+        # Perform convolution
         for k in range(batch_size):
             for i in range(out_channels):
+                temp = None
                 for j in range(in_channels):
-                    out[k,i] += signal.correlate2d(self.data[k,j], kernels.data[i,j], "valid")
-        out = Tensor(out, (self, kernels), op=self.conv2d)
+                    conv = signal.correlate2d(x_padded[k, j], kernels.data[i, j], mode="valid")
+                    if temp is None:
+                        temp = conv
+                    else:
+                        temp += conv
+                # Now temp is the full valid conv sum for this (k, i)
+                # Apply stride
+                temp_strided = temp[::stride, ::stride]
+                out[k, i] = temp_strided
         
+        if bias is not None:
+            out += bias.data.reshape(1, out_channels, 1, 1)
+
+        out = Tensor(out, (self, kernels, bias) if bias is not None else (self, kernels), op=self.conv2d)
+
         def grad_fn(gradient):
+            # Gradient w.r.t. input and kernels
             self.grad = np.zeros_like(self.data)
             kernels.grad = np.zeros_like(kernels.data)
+            if bias is not None:
+                bias.grad = np.zeros_like(bias.data)
+
+            # For backward, upsample the gradient if stride > 1
+            grad_up = gradient
+            if stride > 1:
+                grad_up = np.zeros((batch_size, out_channels, padded_height - kernel_size + 1, padded_width - kernel_size + 1))
+                grad_up[:, :, ::stride, ::stride] = gradient
+            else:
+                grad_up = gradient
+
+            # Backprop through conv
             for k in range(batch_size):
                 for i in range(out_channels):
                     for j in range(in_channels):
-                        kernels.grad[i,j] += signal.correlate2d(self.data[k,j], gradient[k,i], "valid")
-                        self.grad[k,j] += signal.convolve2d(gradient[k,i], kernels.data[i,j], "full")
+                        # dL/dK = x_padded * grad_up
+                        kernels.grad[i, j] += signal.correlate2d(x_padded[k, j], grad_up[k, i], mode="valid")
+                        # dL/dx_padded = grad_up * kernel (flipped)
+                        self_grad_padded = signal.convolve2d(grad_up[k, i], kernels.data[i, j], mode="full")
+                        # Crop self_grad_padded to match input (self.data) shape
+                        h_start = self_grad_padded.shape[0] - self.data.shape[2]
+                        w_start = self_grad_padded.shape[1] - self.data.shape[3]
+                        if h_start > 0 or w_start > 0:
+                            h0 = h_start // 2
+                            w0 = w_start // 2
+                            h1 = h0 + self.data.shape[2]
+                            w1 = w0 + self.data.shape[3]
+                            self_grad_padded = self_grad_padded[h0:h1, w0:w1]
+                        self.grad[k, j] += self_grad_padded
+            # If bias is present, sum over the batch and spatial dimensions
+            if bias is not None:
+                bias.grad += gradient.sum(axis=(0, 2, 3))
         out.grad_fn = grad_fn
-        
         return out
     
     def maxpool2d(self, kernel_height, kernel_width, stride):
@@ -622,7 +670,6 @@ class Tensor:
     def dropout(self, p_drop, training=True):
         if training:
             p_keep = 1 - p_drop
-            # might not work: np.random.rand(self.data.shape[1],self.data.shape[2])
             binary_mask = np.random.rand(*self.data.shape) < p_keep
             result = self.data * binary_mask
             result /= p_keep # inverted dropout
@@ -634,8 +681,7 @@ class Tensor:
             out.grad_fn = grad_fn
             
             return out
-        
-        return out
+        return self
     
     def softmax(self, axis=-1):
         # computes softmax of self tensor along any axis
@@ -727,6 +773,10 @@ class Conv2d(Module):
         #self.normalized_shape = (out_channels, input_height - kernel_size + 1, input_width - kernel_size + 1)
         kernels_shape = (out_channels, in_channels, kernel_size, kernel_size)
         self.bias = bias
+        if bias:
+            self.bias = Tensor(np.zeros(out_channels))
+        else:
+            self.bias = None
         self.kernels = Tensor(np.random.randn(*kernels_shape))
     def __call__(self, x):
         # x is a Tensor of shape (batch_size, channel_dim, height, width)

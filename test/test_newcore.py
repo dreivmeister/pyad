@@ -72,8 +72,6 @@ def test_more_ops():
     assert abs(amg.grad - apt.grad.item()) < tol
     assert abs(bmg.grad - bpt.grad.item()) < tol
     
-    
-
 def test_even_more_ops():
     a = Tensor(1.0)
     b = Tensor(2.0)
@@ -115,19 +113,6 @@ def test_even_more_ops():
     # backward pass went well
     assert abs(amg.grad - apt.grad.item()) < tol
     assert abs(bmg.grad - bpt.grad.item()) < tol
-
-# def test_multiple_backwards():
-#     x = Tensor(2.0)
-#     y = x * x  # y = x^2
-    
-#     # First backward pass
-#     y.backward()
-#     assert x.gradient.data == 4.0  # dy/dx = 2x
-    
-#     # Second backward pass with reset
-#     y.reset_gradients()
-#     y.backward()
-#     assert x.gradient.data == 4.0  # Would be 8.0 without reset_gradients()
 
 def test_sum():
     # Test sum with axis and keepdims, compare against torch
@@ -427,7 +412,7 @@ def test_concat():
     assert np.allclose(x.grad, xt.grad.numpy())
     assert np.allclose(y.grad, yt.grad.numpy())
 
-def test_mean_against_torch():
+def test_mean():
     # Forward test
     x = Tensor([1.0, 2.0, 3.0, 4.0])
     y = x.mean()
@@ -441,7 +426,7 @@ def test_mean_against_torch():
     assert np.allclose(y.data, yt.detach().numpy())
     assert np.allclose(x.grad, xt.grad.numpy())
 
-def test_var_against_torch():
+def test_var():
     # Forward test
     x = Tensor([1.0, 2.0, 3.0, 4.0])
     y = x.var()
@@ -457,7 +442,7 @@ def test_var_against_torch():
     
 
 import torch.nn.functional as F
-def test_softmax_against_torch():
+def test_softmax():
     x_np = np.random.rand(3, 5)
     x = Tensor(x_np)
     y = x.softmax(axis=1)
@@ -470,7 +455,7 @@ def test_softmax_against_torch():
     assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6)
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
     
-def test_max_against_torch():
+def test_max():
     # 1D case
     x_np = np.array([1.0, 3.0, 2.0, 5.0])
     x = Tensor(x_np)
@@ -505,7 +490,7 @@ def test_max_against_torch():
     assert np.allclose(x.grad, xt.grad.numpy())
     
     
-def test_conv2d_against_torch():
+def test_conv2d():
     # Parameters
     batch_size = 2
     in_channels = 3
@@ -516,19 +501,24 @@ def test_conv2d_against_torch():
 
     x_np = np.random.randn(batch_size, in_channels, height, width)
     w_np = np.random.randn(out_channels, in_channels, kernel_size, kernel_size)
+    b_np = np.random.randn(out_channels)
 
     # PyAD tensors
     x = Tensor(x_np)
     w = Tensor(w_np)
+    b = Tensor(b_np)
 
     # PyTorch tensors
     xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
     wt = torch.tensor(w_np, dtype=torch.float64, requires_grad=True)
+    bt = torch.tensor(b_np, dtype=torch.float64, requires_grad=True)
+    
 
     # Forward
-    y = x.conv2d(w, bias=False)    
-    m = torch.nn.Conv2d(in_channels, out_channels, kernel_size, bias=False)
+    y = x.conv2d(w, bias=b)
+    m = torch.nn.Conv2d(in_channels, out_channels, kernel_size, bias=True)
     m.weight = torch.nn.Parameter(wt)
+    m.bias = torch.nn.Parameter(bt)
     yt = m(xt)
 
     assert y.shape == yt.shape
@@ -542,7 +532,7 @@ def test_conv2d_against_torch():
     assert np.allclose(w.grad, m.weight.grad.numpy(), atol=1e-6)
     
     
-def test_maxpool2d_against_torch():
+def test_maxpool2d():
     # Parameters
     batch_size = 2
     channels = 3
@@ -620,7 +610,7 @@ def test_mlp_xor_diff_batch():
     loss2 = ((out2 - Tensor(np.array([[0],[0]], dtype=np.float64))) ** 2).sum()
     loss2.backward()
 
-def test_linear_layer_against_pytorch():
+def test_linear_layer():
     import torch
     import numpy as np
     from pyad.new_core import Tensor, LinearLayer
@@ -668,7 +658,7 @@ def test_linear_layer_against_pytorch():
     
 
 from pyad.new_core import log_softmax
-def test_log_softmax_against_torch():
+def test_log_softmax():
     x_np = np.random.randn(2, 3)
     x = Tensor(x_np)
     y = log_softmax(x, axis=1)
@@ -685,7 +675,7 @@ def test_log_softmax_against_torch():
     
     
 from pyad.new_core import categorical_cross_entropy
-def test_categorical_cross_entropy_against_torch():
+def test_categorical_cross_entropy():
     np.random.seed(42)
 
     batch_size = 5
@@ -715,7 +705,7 @@ def test_categorical_cross_entropy_against_torch():
     assert np.allclose(logits.grad, logits_t.grad.numpy(), atol=1e-6)
 
 from pyad.new_core import negative_log_likelihood    
-def test_negative_log_likelihood_against_torch():
+def test_negative_log_likelihood():
     import torch
     import torch.nn.functional as F
     np.random.seed(42)
@@ -835,3 +825,68 @@ def test_layernorm_conv():
     assert np.allclose(ln.gamma.grad, lnt.weight.grad.numpy(), atol=1e-6), "Gamma gradients do not match"
     assert np.allclose(ln.beta.grad, lnt.bias.grad.numpy(), atol=1e-6), "Beta gradients do not match"
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), "Input gradients do not match"
+    
+def test_conv2d_stride_pad():
+    np.random.seed(42)
+    torch.manual_seed(42)
+    batch_size = 2
+    in_channels = 3
+    out_channels = 2
+    height = 8
+    width = 8
+    kernel_size = 3
+
+    x_np = np.random.randn(batch_size, in_channels, height, width)
+    w_np = np.random.randn(out_channels, in_channels, kernel_size, kernel_size)
+
+    # Settings to test: (stride, padding)
+    settings = [
+        (1, 0),
+        (1, 1),
+        (2, 0),
+        (2, 1),
+        (3, 2),
+    ]
+
+    for stride, pad in settings:
+        # PyAD tensors
+        x = Tensor(x_np)
+        w = Tensor(w_np)
+        # Forward
+        y = x.conv2d(w, stride=stride, pad=pad, bias=None)
+        # PyTorch tensors
+        xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+        wt = torch.tensor(w_np, dtype=torch.float64, requires_grad=True)
+        yt = F.conv2d(xt, wt, bias=None, stride=stride, padding=pad)
+        # Compare outputs
+        assert y.shape == yt.shape, f"Shape mismatch for stride={stride}, pad={pad}"
+        assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6), f"Forward mismatch for stride={stride}, pad={pad}"
+        # Backward
+        y.sum().backward()
+        yt.sum().backward()
+        assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), f"Input grad mismatch for stride={stride}, pad={pad}"
+        assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-6), f"Weight grad mismatch for stride={stride}, pad={pad}"
+        
+def test_dropout_forward():
+    x_np = np.random.randn(4, 5)
+    x = Tensor(x_np)
+    p_drop = 0.5
+    # Test training mode
+    y = x.dropout(p_drop, training=True)
+    # Test inference mode (should be unchanged)
+    y_eval = x.dropout(p_drop, training=False)
+    assert np.allclose(y_eval.data, x_np), "Dropout eval mode should not change input"
+    # Check that some elements are zeroed out in training mode
+    num_zeros = np.sum(y.data == 0)
+    assert num_zeros > 0, "Dropout should zero out some elements in training mode"
+
+def test_dropout_backward():
+    x_np = np.random.randn(3, 3)
+    x = Tensor(x_np)
+    p_drop = 0.3
+    y = x.dropout(p_drop, training=True)
+    y.sum().backward()
+    # The gradient should be nonzero only where mask is 1
+    mask = (y.data != 0)
+    grad_nonzero = (x.grad != 0)
+    assert np.all(mask == grad_nonzero), "Dropout backward mask mismatch"
