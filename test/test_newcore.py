@@ -656,7 +656,6 @@ def test_linear_layer():
     assert np.allclose(b.grad, bt.grad.numpy(), atol=1e-6)
     
     
-
 from pyad.new_core import log_softmax
 def test_log_softmax():
     x_np = np.random.randn(2, 3)
@@ -674,7 +673,7 @@ def test_log_softmax():
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
     
     
-from pyad.new_core import categorical_cross_entropy
+from pyad.new_core import categorical_cross_entropy_from_logits
 def test_categorical_cross_entropy():
     np.random.seed(42)
 
@@ -690,7 +689,7 @@ def test_categorical_cross_entropy():
     # PyAD
     logits = Tensor(logits_np)
     targets = Tensor(onehot_np)
-    loss = categorical_cross_entropy(logits, targets)
+    loss = categorical_cross_entropy_from_logits(logits, targets)
     loss.backward()
 
     # PyTorch
@@ -890,3 +889,65 @@ def test_dropout_backward():
     mask = (y.data != 0)
     grad_nonzero = (x.grad != 0)
     assert np.all(mask == grad_nonzero), "Dropout backward mask mismatch"
+    
+    
+def test_bmm():
+    # Create random batch of matrices
+    batch_size = 4
+    n = 3
+    m = 5
+    p = 2
+    a_np = np.random.randn(batch_size, n, m)
+    b_np = np.random.randn(batch_size, m, p)
+    a = Tensor(a_np)
+    b = Tensor(b_np)
+    # Forward
+    out = a.bmm(b)
+    # Torch reference
+    a_torch = torch.tensor(a_np, dtype=torch.float64, requires_grad=True)
+    b_torch = torch.tensor(b_np, dtype=torch.float64, requires_grad=True)
+    out_torch = torch.bmm(a_torch, b_torch)
+    assert np.allclose(out.data, out_torch.detach().numpy()), f"Forward bmm failed: {out.data} vs {out_torch.detach().numpy()}"
+    out.sum().backward()
+    out_torch.sum().backward()
+    assert np.allclose(a.grad, a_torch.grad.numpy()), f"Backward bmm grad_a failed: {a.grad} vs {a_torch.grad.numpy()}"
+    assert np.allclose(b.grad, b_torch.grad.numpy()), f"Backward bmm grad_b failed: {b.grad} vs {b_torch.grad.numpy()}"
+    
+
+#import torch
+from pyad.new_core import LinearLayer
+def test_linear_layer_3d():
+    np.random.seed(42)
+    torch.manual_seed(42)
+    # 3D input: (B, T, C)
+    B, T, C_in, C_out = 2, 3, 4, 5
+    x_np = np.random.randn(B, T, C_in)
+    w_np = np.random.randn(C_in, C_out)
+    b_np = np.random.randn(C_out)
+    # PyAD
+    x = Tensor(x_np)
+    w = Tensor(w_np)
+    b = Tensor(b_np)
+    # LinearLayer expects (N, in_features), so flatten batch and time
+    #x_flat = Tensor(x_np.reshape(-1, C_in))
+    ll = LinearLayer(C_in, C_out, bias=True)
+    ll.W = w
+    ll.b = b
+    y = ll(x)
+    #y_reshaped = y.reshape((B, T, C_out))
+    y.sum().backward()
+    # Torch
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    wt = torch.tensor(w_np, dtype=torch.float64, requires_grad=True)
+    bt = torch.tensor(b_np, dtype=torch.float64, requires_grad=True)
+    lin = torch.nn.Linear(C_in, C_out)
+    lin.weight = torch.nn.Parameter(wt.T)
+    lin.bias = torch.nn.Parameter(bt)
+    yt = lin(xt)
+    yt.sum().backward()
+    # Compare outputs and gradients
+    print(y.shape, yt.size())
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6), f"Forward mismatch: {y.data} vs {yt.detach().numpy()}"
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), f"Input grad mismatch: {x.grad} vs {xt.grad.numpy()}"
+    assert np.allclose(w.grad, lin.weight.grad.numpy().T, atol=1e-6), f"Weight grad mismatch: {w.grad} vs {wt.grad.numpy()}"
+    assert np.allclose(b.grad, lin.bias.grad.numpy(), atol=1e-6), f"Bias grad mismatch: {b.grad} vs {bt.grad.numpy()}"

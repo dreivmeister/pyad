@@ -86,17 +86,6 @@ class Tensor:
         for t in reversed(topo):
             t.grad_fn(t.grad)
     
-    # def checkbroadcast(self, other):
-    #     for n,(i,j) in enumerate(zip(self.shape, other.shape)):
-    #         if i==j:
-    #             continue
-    #         if i<j:
-    #             self.broadcast_dim = n
-    #             break
-    #         else:
-    #             other.broadcast_dim = n
-    #             break
-    
     @staticmethod
     def zeros(shape):
         return Tensor(np.zeros(shape))
@@ -130,6 +119,10 @@ class Tensor:
         return self.data.shape
 
     @property
+    def ndim(self):
+        return self.data.ndim
+
+    @property
     def dtype(self):
         return self.data.dtype
             
@@ -140,25 +133,24 @@ class Tensor:
         new_tensor.broadcast_dim = self.broadcast_dim
         return new_tensor
             
-    # def __getitem__(self, key):
-    #     sliced_data = self.data[key]
-    #     try:
-    #         sliced_gradient = self.grad[key]
-    #     except TypeError:
-    #         sliced_gradient = 0
+    def __getitem__(self, key):
+        sliced_data = self.data[key]
+        try:
+            sliced_gradient = self.grad[key]
+        except TypeError:
+            sliced_gradient = 0
         
-    #     sliced_tensor = Tensor(data=sliced_data, prev=(self,), op=self.__getitem__)
-    #     sliced_tensor.grad = sliced_gradient
-    #     sliced_tensor.broadcast_dim = self.broadcast_dim
-    #     sliced_tensor.name = self.name
+        out = Tensor(data=sliced_data, prev=(self,), op=self.__getitem__)
+        out.grad = sliced_gradient
+        out.name = self.name
         
-    #     def grad_fn(gradient):
-    #         if isinstance(self.grad, int) and self.grad == 0:
-    #             self.grad = np.zeros_like(self.data)
-    #         self.grad[key] += gradient
-    #     sliced_tensor.grad_fn = grad_fn
+        def grad_fn(gradient):
+            if isinstance(self.grad, int) and self.grad == 0:
+                self.grad = np.zeros_like(self.data)
+            self.grad[key] += gradient
+        out.grad_fn = grad_fn
         
-    #     return sliced_tensor
+        return out
     
     # def __setitem__(self, key, value):
     #     # value is a tensor
@@ -450,6 +442,21 @@ class Tensor:
         
         return out
     
+    def bmm(self, other):
+        # batch matrix multiplication
+        other = promote_array_to_tensor(other)
+        assert self.data.ndim == 3 and other.data.ndim == 3, "Both tensors must be 3D for bmm"
+        out = Tensor(np.einsum('bij,bjk->bik', self.data, other.data), (self, other))
+
+        def grad_fn(gradient):
+            # Gradient w.r.t. self
+            self.grad += np.einsum('bik,bjk->bij', gradient, other.data)
+            # Gradient w.r.t. other
+            other.grad += np.einsum('bij,bik->bjk', self.data, gradient)
+        out.grad_fn = grad_fn
+        
+        return out
+    
     def outer(self, other):
         other = promote_array_to_tensor(other)
         out = Tensor(np.outer(self.data, other.data), (self, other))
@@ -710,6 +717,27 @@ class Tensor:
         
         return out
     
+    def embedding(self, weight):
+        # (b, t)
+        # idx: integer numpy array or Tensor of shape (...,)
+        idx_np = self.data.astype(np.int64)
+        # Gather rows from weight
+        out_data = weight.data[idx_np]
+        out = Tensor(out_data, (weight,), op=self.embedding)
+
+        def grad_fn(gradient):
+            # Accumulate gradient for each index
+            grad_weight = np.zeros_like(weight.data)
+            # gradient has shape (..., embedding_dim)
+            flat_idx = idx_np.ravel()
+            flat_grad = gradient.reshape(-1, grad_weight.shape[1])
+            for i, ind in enumerate(flat_idx):
+                grad_weight[ind] += flat_grad[i]
+            weight.grad += grad_weight
+        out.grad_fn = grad_fn
+        
+        return out
+    
 #NN
 class Module: 
     def zero_grad(self):
@@ -732,14 +760,44 @@ class LinearLayer(Module):
         self.nonlin = nonlin
 
     def __call__(self, x):
+        
+        bs = None
+        if x.ndim == 3:
+            # If x is of shape (batch_size, seq_len, nin), reshape to (batch_size*seq_len, nin)
+            bs = x.shape[0]
+            x = x.reshape((-1, x.shape[-1]))
+        
         act = x.linear(self.W, self.b) if self.bias else x.linear(self.W)
-        return getattr(act, self.nonlin)() if self.nonlin else act
+        act = getattr(act, self.nonlin)() if self.nonlin else act
+        
+        if bs is not None:
+            # Reshape back to (batch_size, seq_len, nout)
+            act = act.reshape((bs, -1, act.shape[-1]))
+            
+        return act
 
     def parameters(self):
         if self.bias:
             return [self.W, self.b]
         else:
             return [self.W]
+        
+class Embedding(Module):
+    """
+    Embedding layer: maps integer indices to embedding vectors.
+    Like torch.nn.Embedding(num_embeddings, embedding_dim)
+    """
+    def __init__(self, num_embeddings, embedding_dim):
+        super().__init__()
+        self.weight = Tensor(np.random.randn(num_embeddings, embedding_dim))
+
+    def __call__(self, idx):
+        # idx is a Tensor of shape (..., num_indices)
+        return idx.embedding(self.weight)
+
+    def parameters(self):
+        return [self.weight]
+        
         
 class MLP(Module):
     def __init__(self, nin, nouts, nonlin='relu') -> None:
@@ -857,10 +915,11 @@ class FeedForward(Module):
     def __init__(self, n_embd):
         self.ll1 = LinearLayer(n_embd, 4*n_embd, nonlin='relu')
         self.ll2 = LinearLayer(4*n_embd, n_embd)
-        self.drop = Dropout(0.5)
+        #self.drop = Dropout(0.5)
     
     def __call__(self, x):
-        return self.drop(self.ll2(self.ll1(x)))
+        return self.ll2(self.ll1(x))
+        #return self.drop(self.ll2(self.ll1(x)))
     
     def parameters(self):
         return [*self.ll1.parameters(), *self.ll2.parameters()]
@@ -875,7 +934,7 @@ class Dropout(Module):
     def parameters(self):
         return []
     
-class Head(Module):
+class CausalSelfAttention(Module): # Head
     def __init__(self, block_size, n_embd, head_size, dropout=0.2, mask=False):
         self.key = LinearLayer(n_embd, head_size, bias=False)
         self.query = LinearLayer(n_embd, head_size, bias=False)
@@ -886,41 +945,42 @@ class Head(Module):
             m[np.triu_indices(block_size,1)] = -np.inf
             self.mask = Tensor(m)
         
-        self.dropout = Dropout(dropout)
+        #self.dropout = Dropout(dropout)
         
     def __call__(self, x):
         B, T, C = x.shape
         k = self.key(x) # (batch_size,block_size,token_dim) @ (n_embd, head_size) 
         q = self.query(x) # (B,T,C)
         
-        wei = q @ k.transpose((0,2,1)) # transpose last two dims
+        #print(q.shape, k.shape)
+        #wei = q @ k.transpose((0,2,1)) # transpose last two dims
+        wei = q.bmm(k.transpose((0,2,1))) # (B, T, T) - attention weights
         if self.do_mask:
-            wei += self.mask
+            wei += self.mask[:T,:T]
         wei = wei.softmax(axis=2) # (B, T, T)
-        wei = self.dropout(wei)
+        #wei = self.dropout(wei)
         
         v = self.value(x)
-        out = wei @ v
+        out = wei.bmm(v)
         return out
     
     def parameters(self):
         return [*self.key.parameters(),*self.query.parameters(),*self.value.parameters()]
 
 class MHA(Module):
-    
     def __init__(self, block_size, n_embd, num_heads, head_size, dropout=0.5, do_mask=False):
-        self.heads = [Head(block_size=block_size,n_embd=n_embd,head_size=head_size,mask=do_mask) for _ in range(num_heads)]
+        self.heads = [CausalSelfAttention(block_size=block_size,n_embd=n_embd,head_size=head_size,mask=do_mask) for _ in range(num_heads)]
         self.proj = LinearLayer(n_embd, n_embd)
-        self.dropout = Dropout(dropout)
+        #self.dropout = Dropout(dropout)
 
     def __call__(self, x):
         out = Tensor.concatenate([h(x) for h in self.heads],axis=-1)
-        out = self.dropout(self.proj(out))
+        #out = self.dropout(self.proj(out))
+        out = self.proj(out)
         return out
 
     def parameters(self):
         return [*self.proj.parameters()] + [p for head in self.heads for p in head.parameters()]
-    
     
 class Block(Module):
     def __init__(self, block_size, n_embd, num_heads, dropout=0.5, do_mask=False):
@@ -929,7 +989,7 @@ class Block(Module):
         # num_heads - number of heads in MHA
         # head_size - embedding dimension in single head
         head_size = n_embd // num_heads
-        self.sa = MHA(block_size,n_embd,num_heads,head_size,dropout,do_mask)
+        self.sa = MHA(block_size, n_embd, num_heads, head_size, dropout, do_mask)
         self.ffwd = FeedForward(n_embd)
         self.ln1 = LayerNorm(n_embd)
         self.ln2 = LayerNorm(n_embd)
@@ -941,6 +1001,48 @@ class Block(Module):
     
     def parameters(self):
         return [*self.sa.parameters(),*self.ln1.parameters(),*self.ln2.parameters(),*self.ffwd.parameters()]
+    
+class Transformer(Module):
+    """ Transformer Language Model, exactly as seen in GPT-2 """
+
+    def __init__(self, config):
+        super().__init__()
+        self.block_size = config.block_size
+        self.config = config
+
+        self.blocks = [Block(config.block_size, config.n_embd, config.n_head, do_mask=True) for _ in range(config.n_layer)]
+        self.wte = Embedding(config.vocab_size, config.n_embd)  # token embeddings
+        self.wpe = Embedding(config.block_size, config.n_embd)  # position embeddingss
+        self.ln_f = LayerNorm(config.n_embd)  # final layer norm
+
+        # language model head, maps to vocab size
+        self.lm_head = LinearLayer(config.n_embd, config.vocab_size, bias=False, nonlin=None)
+
+    def get_block_size(self):
+        return self.block_size
+
+    def __call__(self, idx, targets=None):
+        b, t = idx.shape
+        assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
+        pos = Tensor([[i for i in range(t)]]) # shape (1, t)
+
+        # forward the GPT model itself
+        tok_emb = self.wte(idx) # token embeddings of shape (b, t, n_embd) (b, t) @ (vocab_size, n_embd)
+        pos_emb = self.wpe(pos) # position embeddings of shape (1, t, n_embd)
+        x = tok_emb + pos_emb
+        for block in self.blocks:
+            x = block(x)
+        x = self.ln_f(x)
+        logits = self.lm_head(x) # logits of shape (b, t, vocab_size)
+
+        # if we are given some desired targets also calculate the loss
+        loss = None
+        if targets is not None:
+            # print(logits.shape, targets.shape)
+            # print(logits.reshape((-1, logits.shape[-1])).shape, targets.reshape((-1, targets.shape[-1])).shape)
+            loss = sparse_categorical_crossentropy_from_logits(logits.reshape((-1, logits.shape[-1])), targets.reshape((-1,)), ignore_index=-1) # should have: ignore_index=-1
+            
+        return logits, loss
     
 class BatchNorm1D(Module):
     #https://github.com/renan-cunha/BatchNormalization/blob/master/src/feed_forward/layers.py
@@ -1129,7 +1231,7 @@ def negative_log_likelihood(probs, targets):
     label_probs = probs * targets + (1 - probs) * (1 - targets)
     return -(label_probs.log().mean())
 
-def categorical_cross_entropy(logits, targets, eps=1e-8):
+def categorical_cross_entropy_from_logits(logits, targets, eps=1e-8):
     # multiclass classification
     # logits vector is not a probability vector (columns dont sum to 1)
     # logits: Tensor (batch, num_classes)
@@ -1141,6 +1243,46 @@ def categorical_cross_entropy(logits, targets, eps=1e-8):
     loss = -(targets * log_probs).sum(axis=1).mean()
     return loss
 
+def sparse_categorical_crossentropy_from_logits(logits, targets, ignore_index=None, eps=1e-8):
+    """
+    Computes sparse categorical cross-entropy loss from logits.
+
+    Args:
+        logits of shape (batch_size, num_classes) – raw scores.
+        targets of shape (batch_size,) – integer class labels in [0, num_classes).
+
+    Returns:
+        Loss (float): average negative log-probability assigned to the true classes.
+    """
+    # Numerical stability: subtract max logit per sample
+    logits_max = logits.max(axis=1, keepdims=True)
+    exp_shifted = (logits - logits_max).exp()
+    probs = exp_shifted / exp_shifted.sum(axis=1, keepdims=True)
+
+    t_data = targets.data
+    if ignore_index is not None:
+        mask = (t_data != ignore_index)
+        if not np.any(mask):
+            return Tensor(0.0)
+        batch_indices = np.arange(logits.shape[0])[mask]
+        true_classes = t_data[mask].astype(int)
+        true_probs = probs[batch_indices, true_classes]
+    else:
+        batch_indices = np.arange(logits.shape[0])
+        true_classes = t_data.astype(int)
+        true_probs = probs[batch_indices, true_classes]
+
+    # # Gather the probabilities corresponding to true class labels
+    # batch_indices = np.arange(logits.shape[0])
+    # true_probs = probs[batch_indices, targets.data.astype(int)]
+    
+    # Compute negative log-likelihood
+    nll = -(true_probs + eps).log()  # small epsilon to avoid log(0)
+    
+    # Return average over batch
+    return nll.mean()
+
+
 def hinge_loss(logits, targets):
     # logits is not a prob vector (columns dont sum to 1)
     num_samples = logits.data.shape[0]
@@ -1149,12 +1291,6 @@ def hinge_loss(logits, targets):
 def logistic_prediction(inputs, targets, logistic_layer):
     preds = logistic_layer(inputs)
     return negative_log_likelihood(preds, targets)
-
-def cross_entropy(probs, targets):
-    # preds is a probability vector (each column sums to one)
-    # targets is a one hot vector
-    log_probs = (probs + 1e-8).log()
-    return -(targets * log_probs).sum()
 
 def Attention(Q,K,V,mask):
     # Q, K and V must be of the following shapes (Assumption)

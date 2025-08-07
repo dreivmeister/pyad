@@ -18,7 +18,7 @@ num_test_samples = 100
 X_train, X_test = X[:num_samples], X[num_samples:num_samples+num_test_samples]
 y_train, y_test = y_onehot[:num_samples], y_onehot[num_samples:num_samples+num_test_samples]
 
-from pyad.new_core import Tensor, Conv2d, MaxPool2d, LayerNorm, LinearLayer, categorical_cross_entropy
+from pyad.new_core import Tensor, Conv2d, MaxPool2d, LayerNorm, LinearLayer, cor
 from pyad.optim import Adam
 
 # Hyperparameters
@@ -68,7 +68,7 @@ for epoch in range(epochs):
         y_tensor = Tensor(yb)
         optim.zero_grad()
         out = net(X_tensor)
-        loss = categorical_cross_entropy(out, y_tensor)
+        loss = cross_entropy(out, y_tensor)
         loss.backward()
         optim.step()
         total_loss += loss.data
