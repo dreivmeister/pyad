@@ -1,6 +1,7 @@
 # tests are taken from micrograd:
 # https://github.com/karpathy/micrograd
 # can be run with the command ...\pyad> python -m pytest
+import math
 import torch
 import numpy as np
 from pyad.new_core import Tensor
@@ -705,8 +706,8 @@ def test_categorical_cross_entropy():
 
 from pyad.new_core import negative_log_likelihood    
 def test_negative_log_likelihood():
-    import torch
-    import torch.nn.functional as F
+    # import torch
+    # import torch.nn.functional as F
     np.random.seed(42)
 
     batch_size = 8
@@ -951,3 +952,192 @@ def test_linear_layer_3d():
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), f"Input grad mismatch: {x.grad} vs {xt.grad.numpy()}"
     assert np.allclose(w.grad, lin.weight.grad.numpy().T, atol=1e-6), f"Weight grad mismatch: {w.grad} vs {wt.grad.numpy()}"
     assert np.allclose(b.grad, lin.bias.grad.numpy(), atol=1e-6), f"Bias grad mismatch: {b.grad} vs {bt.grad.numpy()}"
+    
+    
+def test_embedding():
+    # Parameters
+    batch_size = 3
+    seq_len = 4
+    vocab_size = 10
+    emb_dim = 6
+    np.random.seed(42)
+    torch.manual_seed(42)
+    # Random integer indices
+    idx_np = np.random.randint(0, vocab_size, size=(batch_size, seq_len))
+    weight_np = np.random.randn(vocab_size, emb_dim)
+    # PyAD
+    idx = Tensor(idx_np)
+    weight = Tensor(weight_np)
+    out = idx.embedding(weight)
+    # Torch
+    idx_t = torch.tensor(idx_np, dtype=torch.long)
+    weight_t = torch.tensor(weight_np, dtype=torch.float64, requires_grad=True)
+    emb_t = torch.nn.Embedding(vocab_size, emb_dim)
+    emb_t.weight = torch.nn.Parameter(weight_t)
+    out_t = emb_t(idx_t)
+    # Compare forward
+    assert np.allclose(out.data, out_t.detach().numpy(), atol=1e-6), f"Embedding forward mismatch: {out.data} vs {out_t.detach().numpy()}"
+    # Backward
+    dout = np.random.randn(*out.data.shape)
+    out.backward(dout)
+    out_t.backward(torch.tensor(dout, dtype=torch.float64))
+    assert np.allclose(weight.grad, emb_t.weight.grad.numpy(), atol=1e-6), f"Embedding grad mismatch: {weight.grad} vs {emb_t.weight.grad.numpy()}"
+    
+def test_getitem():
+    np.random.seed(42)
+    torch.manual_seed(42)
+
+    # Create a random tensor
+    x_np = np.random.randn(4, 5, 6)
+    x = Tensor(x_np)
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+
+    # Test various slicing/indexing
+    slices = [
+        ([1,2],[0,1],[3,4]),
+        #(slice(None), slice(None), slice(None)),  # full
+        #(slice(1, 3), slice(None), slice(None)),  # range on first axis
+        # (slice(None), 2, slice(None)),            # integer index on second axis
+        # (slice(None), slice(None), 4),            # integer index on third axis
+        # (1, 2, 3),                                # single element
+        # (Ellipsis, 2),                            # ellipsis
+        # (slice(None, None, 2), slice(None), slice(None)),  # step
+    ]
+
+    for s in slices:
+        y = x[s]
+        yt = xt[s]
+        assert np.allclose(y.data, yt.detach().numpy()), f"Forward getitem mismatch for slice {s}"
+
+        # Backward: sum to scalar, then backward
+        # x.grad = np.zeros_like(x.data)
+        # xt.grad = None
+        y.sum().backward()
+        yt.sum().backward()
+        assert np.allclose(x.grad, xt.grad.numpy()), f"Backward getitem grad mismatch for slice {s}"
+
+
+# ...existing code...
+
+def test_sparse_ce_no_ignore_index():
+    from pyad.new_core import sparse_categorical_crossentropy_from_logits
+
+    np.random.seed(0)
+    torch.manual_seed(0)
+
+    N, C = 7, 5
+    logits_np = np.random.randn(N, C)
+    targets_np = np.random.randint(0, C, size=(N,), dtype=np.int64)
+
+    # Our framework
+    logits = Tensor(logits_np)
+    targets = Tensor(targets_np)
+    loss = sparse_categorical_crossentropy_from_logits(logits, targets, ignore_index=None)
+    loss.backward()
+
+    # Torch reference
+    logits_t = torch.tensor(logits_np, dtype=torch.float64, requires_grad=True)
+    targets_t = torch.tensor(targets_np, dtype=torch.long)
+    ce = torch.nn.CrossEntropyLoss(reduction='mean')
+    loss_t = ce(logits_t, targets_t)
+    loss_t.backward()
+
+    assert np.allclose(loss.data, loss_t.detach().numpy(), atol=1e-6), "Forward loss mismatch (no ignore_index)"
+    assert np.allclose(logits.grad, logits_t.grad.numpy(), atol=1e-6), "Logits grad mismatch (no ignore_index)"
+
+
+def test_sparse_ce_with_ignore_index():
+    from pyad.new_core import sparse_categorical_crossentropy_from_logits
+
+    np.random.seed(1)
+    torch.manual_seed(1)
+
+    N, C = 9, 6
+    logits_np = np.random.randn(N, C)
+    targets_np = np.random.randint(0, C, size=(N,), dtype=np.int64)
+
+    # Mark a few entries to ignore
+    ignore_index = -1
+    ignore_mask = np.zeros(N, dtype=bool)
+    ignore_mask[[1, 4, 7]] = True
+    targets_np[ignore_mask] = ignore_index
+
+    # Our framework
+    logits = Tensor(logits_np)
+    targets = Tensor(targets_np)
+    loss = sparse_categorical_crossentropy_from_logits(logits, targets, ignore_index=ignore_index)
+    loss.backward()
+
+    # Torch reference
+    logits_t = torch.tensor(logits_np, dtype=torch.float64, requires_grad=True)
+    targets_t = torch.tensor(targets_np, dtype=torch.long)
+    ce = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction='mean')
+    loss_t = ce(logits_t, targets_t)
+    loss_t.backward()
+
+    assert np.allclose(loss.data, loss_t.detach().numpy(), atol=1e-6), "Forward loss mismatch (with ignore_index)"
+    assert np.allclose(logits.grad, logits_t.grad.numpy(), atol=1e-6), "Logits grad mismatch (with ignore_index)"
+    # Additionally, gradients for ignored rows should be exactly zero
+    assert np.allclose(logits.grad[ignore_mask], 0.0, atol=1e-12), "Ignored rows"
+    
+    
+def test_gelu_forward_backward():
+    np.random.seed(0)
+    torch.manual_seed(0)
+    
+    class NewGELU(torch.nn.Module):
+        """
+        Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
+        Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
+        """
+        def forward(self, x):
+            return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+
+    x_np = np.random.randn(7, 11)
+    x = Tensor(x_np.copy())
+    xt = torch.tensor(x_np.copy(), dtype=torch.float64, requires_grad=True)
+
+    # Forward
+    y = x.gelu()
+    gl = NewGELU()
+    yt = gl(xt)  # matches our tanh-based approximation
+
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-6), "GELU forward mismatch"
+
+    # Backward (sum to scalar)
+    y.sum().backward()
+    yt.sum().backward()
+
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6), "GELU backward grad mismatch"
+
+
+def test_gelu_broadcast_chain():
+    np.random.seed(1)
+    torch.manual_seed(1)
+    
+    class NewGELU(torch.nn.Module):
+        """
+        Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
+        Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
+        """
+        def forward(self, x):
+            return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+
+    x_np = np.random.randn(5, 4)
+    w_np = np.random.randn(4, 6)
+
+    x = Tensor(x_np.copy())
+    w = Tensor(w_np.copy())
+    xt = torch.tensor(x_np.copy(), dtype=torch.float64, requires_grad=True)
+    wt = torch.tensor(w_np.copy(), dtype=torch.float64, requires_grad=True)
+
+    out = x.gelu().linear(w)  # (5,6)
+    gl = NewGELU()
+    out_t = gl(xt) @ wt
+
+    out.sum().backward()
+    out_t.sum().backward()
+
+    assert np.allclose(out.data, out_t.detach().numpy(), atol=1e-6)
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
+    assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-6)

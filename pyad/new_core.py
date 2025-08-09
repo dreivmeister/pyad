@@ -350,6 +350,25 @@ class Tensor:
         def grad_fn(gradient):
             self.grad += gradient * (1 - t**2)
         out.grad_fn = grad_fn
+        
+        return out
+    
+    def gelu(self):
+        # Approximate GELU (Hendrycks & Gimpel) using tanh
+        # gelu(x) = 0.5 * x * (1 + tanh( sqrt(2/pi)*(x + 0.044715 x^3) ))
+        x = self.data
+        c0 = 0.044715
+        c1 = 0.7978845608028654  # sqrt(2/pi)
+        inner = c1 * (x + c0 * x**3)
+        tanh_inner = np.tanh(inner)
+        gelu_data = 0.5 * x * (1 + tanh_inner)
+        out = Tensor(gelu_data, (self,), op=self.gelu)
+        def grad_fn(gradient):
+            # d/dx gelu(x) ≈ 0.5*(1 + tanh_inner) + 0.5*x*(1 - tanh_inner^2)*c1*(1 + 3*c0*x^2)
+            deriv = 0.5*(1 + tanh_inner) + 0.5 * x * (1 - tanh_inner**2) * c1 * (1 + 3*c0*x**2)
+            self.grad += gradient * deriv
+        out.grad_fn = grad_fn
+        
         return out
     
     def exp(self):
@@ -913,7 +932,7 @@ class MaxPool2d(Module):
 
 class FeedForward(Module):
     def __init__(self, n_embd):
-        self.ll1 = LinearLayer(n_embd, 4*n_embd, nonlin='relu')
+        self.ll1 = LinearLayer(n_embd, 4*n_embd, nonlin='gelu')
         self.ll2 = LinearLayer(4*n_embd, n_embd)
         #self.drop = Dropout(0.5)
     
@@ -934,11 +953,13 @@ class Dropout(Module):
     def parameters(self):
         return []
     
+from math import sqrt
 class CausalSelfAttention(Module): # Head
     def __init__(self, block_size, n_embd, head_size, dropout=0.2, mask=False):
         self.key = LinearLayer(n_embd, head_size, bias=False)
         self.query = LinearLayer(n_embd, head_size, bias=False)
         self.value = LinearLayer(n_embd, head_size, bias=False)
+        self.scale = 1 / sqrt(head_size)
         self.do_mask = mask
         if mask:
             m = np.zeros((block_size,block_size))
@@ -954,7 +975,7 @@ class CausalSelfAttention(Module): # Head
         
         #print(q.shape, k.shape)
         #wei = q @ k.transpose((0,2,1)) # transpose last two dims
-        wei = q.bmm(k.transpose((0,2,1))) # (B, T, T) - attention weights
+        wei = q.bmm(k.transpose((0,2,1))) * self.scale # (B, T, T) - attention weights
         if self.do_mask:
             wei += self.mask[:T,:T]
         wei = wei.softmax(axis=2) # (B, T, T)
@@ -1038,9 +1059,8 @@ class Transformer(Module):
         # if we are given some desired targets also calculate the loss
         loss = None
         if targets is not None:
-            # print(logits.shape, targets.shape)
-            # print(logits.reshape((-1, logits.shape[-1])).shape, targets.reshape((-1, targets.shape[-1])).shape)
-            loss = sparse_categorical_crossentropy_from_logits(logits.reshape((-1, logits.shape[-1])), targets.reshape((-1,)), ignore_index=-1) # should have: ignore_index=-1
+            loss = sparse_categorical_crossentropy_from_logits(
+                logits.reshape((-1, logits.shape[-1])), targets.reshape((-1,)), ignore_index=-1)
             
         return logits, loss
     
@@ -1259,38 +1279,26 @@ def sparse_categorical_crossentropy_from_logits(logits, targets, ignore_index=No
     exp_shifted = (logits - logits_max).exp()
     probs = exp_shifted / exp_shifted.sum(axis=1, keepdims=True)
 
-    t_data = targets.data
     if ignore_index is not None:
-        mask = (t_data != ignore_index)
+        mask = (targets.data != ignore_index)
         if not np.any(mask):
             return Tensor(0.0)
         batch_indices = np.arange(logits.shape[0])[mask]
-        true_classes = t_data[mask].astype(int)
+        true_classes = targets.data[mask].astype(int)
         true_probs = probs[batch_indices, true_classes]
     else:
         batch_indices = np.arange(logits.shape[0])
-        true_classes = t_data.astype(int)
+        true_classes = targets.data.astype(int)
         true_probs = probs[batch_indices, true_classes]
-
-    # # Gather the probabilities corresponding to true class labels
-    # batch_indices = np.arange(logits.shape[0])
-    # true_probs = probs[batch_indices, targets.data.astype(int)]
     
-    # Compute negative log-likelihood
-    nll = -(true_probs + eps).log()  # small epsilon to avoid log(0)
-    
-    # Return average over batch
-    return nll.mean()
+    # Compute mean of negative log-likelihood
+    return -(true_probs + eps).log().mean()  # small epsilon to avoid log(0)
 
 
 def hinge_loss(logits, targets):
     # logits is not a prob vector (columns dont sum to 1)
     num_samples = logits.data.shape[0]
     return 1./num_samples * (1. - targets * logits).relu().sum()
-
-def logistic_prediction(inputs, targets, logistic_layer):
-    preds = logistic_layer(inputs)
-    return negative_log_likelihood(preds, targets)
 
 def Attention(Q,K,V,mask):
     # Q, K and V must be of the following shapes (Assumption)
