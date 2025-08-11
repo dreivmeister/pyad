@@ -462,18 +462,20 @@ class Tensor:
         return out
     
     def bmm(self, other):
-        # batch matrix multiplication
+        # Batch matrix multiplication for 3D or 4D tensors
         other = promote_array_to_tensor(other)
-        assert self.data.ndim == 3 and other.data.ndim == 3, "Both tensors must be 3D for bmm"
-        out = Tensor(np.einsum('bij,bjk->bik', self.data, other.data), (self, other))
+        assert self.data.ndim in (3, 4) and other.data.ndim == self.data.ndim, "Both tensors must be 3D or 4D for bmm"
+        # (B, N, M) @ (B, M, K) -> (B, N, K)
+        # (A, B, N, M) @ (A, B, M, K) -> (A, B, N, K)
+        out = Tensor(np.matmul(self.data, other.data), (self, other), op=Tensor.bmm)
 
         def grad_fn(gradient):
-            # Gradient w.r.t. self
-            self.grad += np.einsum('bik,bjk->bij', gradient, other.data)
-            # Gradient w.r.t. other
-            other.grad += np.einsum('bij,bik->bjk', self.data, gradient)
+            # (B, N, K) grad
+            # (A, B, N, K) grad
+            self.grad += np.matmul(gradient, np.swapaxes(other.data, -2, -1))
+            other.grad += np.matmul(np.swapaxes(self.data, -2, -1), gradient)
         out.grad_fn = grad_fn
-        
+
         return out
     
     def outer(self, other):
@@ -756,7 +758,28 @@ class Tensor:
         out.grad_fn = grad_fn
         
         return out
-    
+
+    def split(self, size, axis=-1):
+        # Split the tensor along the specified axis into chunks of the given size (only int allowed)
+        assert isinstance(size, int), "Size must be an integer"
+        assert size > 0, "Size must be positive"
+        splits = np.split(self.data, indices_or_sections=self.data.shape[axis] // size, axis=axis)
+        out_tensors = []
+        idx = 0
+        for chunk in splits:
+            slc = [slice(None)] * self.data.ndim
+            slc[axis] = slice(idx, idx + chunk.shape[axis])
+            def make_grad_fn(slc_):
+                def grad_fn(gradient):
+                    self.grad[tuple(slc_)] += gradient
+                return grad_fn
+            t = Tensor(chunk, (self,), op=Tensor.split)
+            t.grad_fn = make_grad_fn(slc)
+            out_tensors.append(t)
+            idx += chunk.shape[axis]
+            
+        return out_tensors
+
 #NN
 class Module: 
     def zero_grad(self):
@@ -808,7 +831,7 @@ class Embedding(Module):
     """
     def __init__(self, num_embeddings, embedding_dim):
         super().__init__()
-        self.weight = Tensor(np.random.randn(num_embeddings, embedding_dim))
+        self.weight = Tensor(np.random.randn(num_embeddings, embedding_dim) / np.sqrt(embedding_dim))
 
     def __call__(self, idx):
         # idx is a Tensor of shape (..., num_indices)
@@ -879,56 +902,6 @@ class MaxPool2d(Module):
 
     def parameters(self):
         return []
-    
-# class MultiHeadAttention(Module):
-#     def __init__(self, h, d_model, T, mask=False):
-#         # maybe dont need T
-#         self.h = h # num heads
-#         self.d_model = d_model # embedding dim
-#         self.T = T # sequence length
-#         self.d_k = self.d_v = int(d_model/h) #dimension key,value
-#         self.mask = None
-#         if mask:
-#             # gen mask
-#             # shape might be wrong
-#             m = np.zeros((self.d_model,self.d_model))
-#             m[np.triu_indices(self.d_model,1)] = -np.inf
-#             self.mask = Tensor(m)
-        
-#         # one list of three matrices for each head
-#         self.weights_heads = []
-#         for i in range(h):
-#             k = np.sqrt(1/self.d_k)
-#             # for each head
-#             #nin - number of columns
-#             #nout - number of rows
-            
-#             weights_headi = [Tensor(np.random.uniform(-k, k, (self.d_model, self.d_k))),
-#                              Tensor(np.random.uniform(-k, k, (self.d_model, self.d_k))),
-#                              Tensor(np.random.uniform(-k, k, (self.d_model, self.d_v)))]
-#             # weights_headi = [Wi^Q,Wi^K,Wi^V]
-#             self.weights_heads.append(weights_headi)
-        
-#         # output linear projection
-#         self.W_O = Tensor(np.random.uniform(-k, k, (int(self.h*self.d_v), self.d_model)))
-        
-    
-#     def __call__(self, Q, K, V):
-        
-#         head_attentions = []
-#         for i in range(self.h):
-#             WQ = self.weights_heads[i][0]
-#             WK = self.weights_heads[i][1]
-#             WV = self.weights_heads[i][2]
-#             head_attentions.append(Attention(Q @ WQ, K @ WK, V @ WV, self.mask))
-            
-#         concated_heads = Tensor.concatenate(head_attentions,axis=1)
-#         lin_proj_concated_heads = concated_heads @ self.W_O
-        
-#         return lin_proj_concated_heads
-    
-#     def parameters(self):
-#         return [self.W_O] + [mat for head in self.weights_heads for mat in head]
 
 class FeedForward(Module):
     def __init__(self, n_embd):
@@ -963,8 +936,10 @@ class CausalSelfAttention(Module): # Head
         self.do_mask = mask
         if mask:
             m = np.zeros((block_size,block_size))
-            m[np.triu_indices(block_size,1)] = -np.inf
-            self.mask = Tensor(m)
+            m[np.triu_indices(block_size,1)] = float('-inf')
+            m = np.expand_dims(m, axis=0) # add batch dimension
+            #print(m)
+            self.mask = m
         
         #self.dropout = Dropout(dropout)
         
@@ -977,8 +952,10 @@ class CausalSelfAttention(Module): # Head
         #wei = q @ k.transpose((0,2,1)) # transpose last two dims
         wei = q.bmm(k.transpose((0,2,1))) * self.scale # (B, T, T) - attention weights
         if self.do_mask:
-            wei += self.mask[:T,:T]
+            wei = wei + self.mask[:, :T,:T]
+            #print(wei)
         wei = wei.softmax(axis=2) # (B, T, T)
+        #print(wei)
         #wei = self.dropout(wei)
         
         v = self.value(x)
@@ -988,20 +965,44 @@ class CausalSelfAttention(Module): # Head
     def parameters(self):
         return [*self.key.parameters(),*self.query.parameters(),*self.value.parameters()]
 
-class MHA(Module):
-    def __init__(self, block_size, n_embd, num_heads, head_size, dropout=0.5, do_mask=False):
-        self.heads = [CausalSelfAttention(block_size=block_size,n_embd=n_embd,head_size=head_size,mask=do_mask) for _ in range(num_heads)]
-        self.proj = LinearLayer(n_embd, n_embd)
-        #self.dropout = Dropout(dropout)
+from math import sqrt
+class CausalMultiHeadSelfAttention(Module):
+    def __init__(self, n_embd, n_head, block_size):
+        super().__init__()
+        assert n_embd % n_head == 0
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = LinearLayer(n_embd, 3 * n_embd)
+        # output projection
+        self.c_proj = LinearLayer(n_embd, n_embd)
+        # causal mask to ensure that attention is only applied to the left in the input sequence
+        m = np.zeros((block_size,block_size))
+        m[np.triu_indices(block_size,1)] = float('-inf')
+        m = np.expand_dims(m, axis=(0,1))
+        self.bias = m
+        self.n_head = n_head
+        self.n_embd = n_embd
 
     def __call__(self, x):
-        out = Tensor.concatenate([h(x) for h in self.heads],axis=-1)
-        #out = self.dropout(self.proj(out))
-        out = self.proj(out)
-        return out
+        B, T, C = x.shape # batch size, sequence length, embedding dimensionality (n_embd)
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k ,v  = self.c_attn(x).split(self.n_embd, axis=2)
+        hs = C // self.n_head # head size
+        k = k.reshape((B, T, self.n_head, hs)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
+        q = q.reshape((B, T, self.n_head, hs)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
+        v = v.reshape((B, T, self.n_head, hs)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
 
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        att = q.bmm(k.transpose((0, 1, 3, 2)) * (1.0 / sqrt(hs)))
+        att = att + self.bias[:,:,:T,:T]
+        att = att.softmax(axis=-1)
+        y = att.bmm(v) # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose((0, 2, 1, 3)).reshape((B, T, C)) # re-assemble all head outputs side by side
+        # output projection
+        y = self.c_proj(y)
+        return y
+    
     def parameters(self):
-        return [*self.proj.parameters()] + [p for head in self.heads for p in head.parameters()]
+        return [*self.c_attn.parameters(), *self.c_proj.parameters()]
     
 class Block(Module):
     def __init__(self, block_size, n_embd, num_heads, dropout=0.5, do_mask=False):
@@ -1010,19 +1011,20 @@ class Block(Module):
         # num_heads - number of heads in MHA
         # head_size - embedding dimension in single head
         head_size = n_embd // num_heads
-        self.sa = MHA(block_size, n_embd, num_heads, head_size, dropout, do_mask)
+        self.attn = CausalMultiHeadSelfAttention(n_embd, num_heads, block_size)
+        #self.sa = MHA(block_size, n_embd, num_heads, head_size, dropout, do_mask)
         self.ffwd = FeedForward(n_embd)
         self.ln1 = LayerNorm(n_embd)
         self.ln2 = LayerNorm(n_embd)
         
     def __call__(self, x):
-        x = x + self.sa(self.ln1(x))
+        x = x + self.attn(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
         return x
     
     def parameters(self):
-        return [*self.sa.parameters(),*self.ln1.parameters(),*self.ln2.parameters(),*self.ffwd.parameters()]
-    
+        return [*self.attn.parameters(),*self.ln1.parameters(),*self.ln2.parameters(),*self.ffwd.parameters()]
+
 class Transformer(Module):
     """ Transformer Language Model, exactly as seen in GPT-2 """
 
@@ -1064,6 +1066,27 @@ class Transformer(Module):
             
         return logits, loss
     
+    def parameters(self):
+        return [*self.wte.parameters(), *self.wpe.parameters(), *self.ln_f.parameters(), *self.lm_head.parameters()] + [p for block in self.blocks for p in block.parameters()]
+    
+    
+    
+
+# class MHA(Module):
+#     def __init__(self, block_size, n_embd, num_heads, head_size, dropout=0.5, do_mask=False):
+#         self.heads = [CausalSelfAttention(block_size=block_size,n_embd=n_embd,head_size=head_size,mask=do_mask) for _ in range(num_heads)]
+#         self.proj = LinearLayer(n_embd, n_embd)
+#         #self.dropout = Dropout(dropout)
+
+#     def __call__(self, x):
+#         out = Tensor.concatenate([h(x) for h in self.heads],axis=-1)
+#         #out = self.dropout(self.proj(out))
+#         out = self.proj(out)
+#         return out
+
+#     def parameters(self):
+#         return [*self.proj.parameters()] + [p for head in self.heads for p in head.parameters()]
+
 class BatchNorm1D(Module):
     #https://github.com/renan-cunha/BatchNormalization/blob/master/src/feed_forward/layers.py
     def __init__(self, num_features, momentum=0.1) -> None:
@@ -1097,31 +1120,51 @@ class BatchNorm1D(Module):
     def parameters(self):
         return [self.gamma, self.beta]
     
-class LayerNorm(Module):
-    # input of shape (N,D)
-    # or other i think
-    def __init__(self, normalized_shape):
-        # normalized_shape is equivalent to num_features for input in form (N,num_features)
-        if isinstance(normalized_shape, int):
-            self.normalized_shape = (normalized_shape,)
-        elif isinstance(normalized_shape, tuple):
-            self.normalized_shape = normalized_shape
+# class LayerNorm(Module):
+#     # input of shape (N,D)
+#     # or other i think
+#     def __init__(self, normalized_shape):
+#         # normalized_shape is equivalent to num_features for input in form (N,num_features)
+#         if isinstance(normalized_shape, int):
+#             self.normalized_shape = (normalized_shape,)
+#         elif isinstance(normalized_shape, tuple):
+#             self.normalized_shape = normalized_shape
         
-        # i think this is correct but might not be
-        self.axis_tuple = tuple([i for i in range(1, len(self.normalized_shape)+1)])
+#         # i think this is correct but might not be
+#         self.axis_tuple = tuple([i for i in range(1, len(self.normalized_shape)+1)])
         
-        self.gamma = Tensor.ones(normalized_shape)
-        self.beta = Tensor.zeros(normalized_shape)
+#         self.gamma = Tensor.ones(normalized_shape)
+#         self.beta = Tensor.zeros(normalized_shape)
         
-    def __call__(self, x):
-        # x is of shape normalized_shape
-        m = x.mean(axis=self.axis_tuple, keepdims=True)
-        v = x.var(axis=self.axis_tuple, keepdims=True) + 1e-5
+#     def __call__(self, x):
+#         # x is of shape normalized_shape
+#         m = x.mean(axis=self.axis_tuple, keepdims=True)
+#         v = x.var(axis=self.axis_tuple, keepdims=True) + 1e-5
 
-        return ((x - m)/v.sqrt())*self.gamma + self.beta
+#         return ((x - m)/v.sqrt())*self.gamma + self.beta
         
+#     def parameters(self):
+#         return [self.gamma, self.beta]
+    
+    
+class LayerNorm(Module):
+    def __init__(self, normalized_shape, eps=1e-5):
+        if isinstance(normalized_shape, int):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = tuple(normalized_shape)
+        self.eps = eps
+        self.gamma = Tensor.ones(self.normalized_shape)
+        self.beta  = Tensor.zeros(self.normalized_shape)
+
+    def __call__(self, x):
+        # Normalize over the LAST len(normalized_shape) dims (GPT style)
+        axes = tuple(range(x.ndim - len(self.normalized_shape), x.ndim))
+        m = x.mean(axis=axes, keepdims=True)
+        v = x.var(axis=axes, keepdims=True)  # already +eps in division below
+        return ((x - m) / (v + self.eps).sqrt()) * self.gamma + self.beta
+
     def parameters(self):
-        return [self.gamma, self.beta]   
+        return [self.gamma, self.beta]
 
 class TemporalAffine(Module):
     """

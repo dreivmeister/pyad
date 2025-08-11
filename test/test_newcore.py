@@ -994,7 +994,8 @@ def test_getitem():
 
     # Test various slicing/indexing
     slices = [
-        ([1,2],[0,1],[3,4]),
+        ([0,2],[0,1],[0,4]),
+        (slice(3), slice(2), slice(5)),  # range on all axes
         #(slice(None), slice(None), slice(None)),  # full
         #(slice(1, 3), slice(None), slice(None)),  # range on first axis
         # (slice(None), 2, slice(None)),            # integer index on second axis
@@ -1141,3 +1142,219 @@ def test_gelu_broadcast_chain():
     assert np.allclose(out.data, out_t.detach().numpy(), atol=1e-6)
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
     assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-6)
+    
+    
+def test_feedforward_module():
+    from pyad.new_core import FeedForward
+    
+    class NewGELU(torch.nn.Module):
+        """
+        Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
+        Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
+        """
+        def forward(self, x):
+            return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+
+    np.random.seed(123)
+    torch.manual_seed(123)
+
+    n_embd = 8
+    B, T = 5, 4  # batch, seq
+
+    # Create pyad FeedForward
+    ff_py = FeedForward(n_embd)
+
+    # Torch equivalent
+    class TorchFF(torch.nn.Module):
+        def __init__(self, n_embd):
+            super().__init__()
+            self.fc1 = torch.nn.Linear(n_embd, 4 * n_embd)
+            self.fc2 = torch.nn.Linear(4 * n_embd, n_embd)
+            self.gelu = NewGELU()
+        def forward(self, x):
+            return self.fc2(self.gelu(self.fc1(x)))
+
+    ff_th = TorchFF(n_embd).double()
+
+    # Copy weights (LinearLayer stores W (nin,nout))
+    with torch.no_grad():
+        ff_th.fc1.weight.copy_(torch.tensor(ff_py.ll1.W.data.T))
+        ff_th.fc1.bias.copy_(torch.tensor(ff_py.ll1.b.data))
+        ff_th.fc2.weight.copy_(torch.tensor(ff_py.ll2.W.data.T))
+        ff_th.fc2.bias.copy_(torch.tensor(ff_py.ll2.b.data))
+
+    # Test both 2D and 3D inputs
+    for shape in [(B, n_embd), (B, T, n_embd)]:
+        x_np = np.random.randn(*shape)
+        x_py = Tensor(x_np.copy())
+        x_th = torch.tensor(x_np.copy(), dtype=torch.float64, requires_grad=True)
+
+        # Forward
+        out_py = ff_py(x_py)
+        out_th = ff_th(x_th)
+        assert np.allclose(out_py.data, out_th.detach().numpy(), atol=1e-6), f"Forward mismatch shape {shape}"
+
+        # Backward (sum to scalar)
+        x_py.grad = np.zeros_like(x_py.data)
+        out_py.sum().backward()
+        out_th.sum().backward()
+
+        # Compare input gradients
+        assert np.allclose(x_py.grad, x_th.grad.numpy(), atol=1e-6), f"Input grad mismatch shape {shape}"
+
+    # Compare parameter gradients (after last backward)
+    # Torch grads already populated
+    assert np.allclose(ff_py.ll1.W.grad, ff_th.fc1.weight.grad.numpy().T, atol=1e-6), "fc1.W grad mismatch"
+    assert np.allclose(ff_py.ll1.b.grad, ff_th.fc1.bias.grad.numpy(), atol=1e-6), "fc1.b grad mismatch"
+    assert np.allclose(ff_py.ll2.W.grad, ff_th.fc2.weight.grad.numpy().T, atol=1e-6), "fc2.W grad mismatch"
+    assert np.allclose(ff_py.ll2.b.grad, ff_th.fc2.bias.grad.numpy(), atol=1e-6), "fc2.b grad mismatch"
+    
+def test_mha_vs_torch_causal_self_attention():
+    # import numpy as np
+    # import torch
+    # import torch.nn as nn
+    # import torch.nn.functional as F
+    # import math
+    from pyad.new_core import Tensor, CausalMultiHeadSelfAttention
+
+    class Config:
+        block_size = 6
+        n_embd = 8
+        n_head = 2
+
+    np.random.seed(42)
+    torch.manual_seed(42)
+
+    cfg = Config()
+    head_size = cfg.n_embd // cfg.n_head
+
+    # --- Build pyad MHA ---
+    mha_pyad = CausalMultiHeadSelfAttention(cfg.n_embd, cfg.n_head, cfg.block_size)
+
+    # --- Build torch CausalSelfAttention ---
+    class TorchCausalSelfAttention(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            assert config.n_embd % config.n_head == 0
+            self.c_attn = torch.nn.Linear(config.n_embd, 3 * config.n_embd)
+            self.c_proj = torch.nn.Linear(config.n_embd, config.n_embd)
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                         .view(1, 1, config.block_size, config.block_size))
+            self.n_head = config.n_head
+            self.n_embd = config.n_embd
+
+        def forward(self, x):
+            B, T, C = x.size()
+            q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+            k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
+            y = att @ v
+            y = y.transpose(1, 2).contiguous().view(B, T, C)
+            y = self.c_proj(y)
+            return y
+
+    mha_torch = TorchCausalSelfAttention(cfg).double()
+
+    # --- Set weights to be the same ---
+    # 1. Set c_attn weights/bias
+    W = np.random.randn(cfg.n_embd, 3 * cfg.n_embd)
+    b = np.random.randn(3 * cfg.n_embd)
+    with torch.no_grad():
+        mha_torch.c_attn.weight.copy_(torch.tensor(W.T))
+        mha_torch.c_attn.bias.copy_(torch.tensor(b))
+    mha_pyad.c_attn.W.data[:] = W
+    mha_pyad.c_attn.b.data[:] = b
+
+    # 2. Set c_proj weights/bias
+    W_proj = np.random.randn(cfg.n_embd, cfg.n_embd)
+    b_proj = np.random.randn(cfg.n_embd)
+    with torch.no_grad():
+        mha_torch.c_proj.weight.copy_(torch.tensor(W_proj.T))
+        mha_torch.c_proj.bias.copy_(torch.tensor(b_proj))
+    mha_pyad.c_proj.W.data[:] = W_proj
+    mha_pyad.c_proj.b.data[:] = b_proj
+
+    # --- Forward ---
+    B, T, C = 2, cfg.block_size, cfg.n_embd
+    x_np = np.random.randn(B, T, C)
+    x_pyad = Tensor(x_np.copy())
+    x_torch = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+
+    out_pyad = mha_pyad(x_pyad)
+    out_torch = mha_torch(x_torch)
+
+    assert np.allclose(out_pyad.data, out_torch.detach().numpy(), atol=1e-5, equal_nan=True), "Forward outputs mismatch"
+
+    # --- Backward ---
+    out_pyad.sum().backward()
+    out_torch.sum().backward()
+
+    # Compare input gradients
+    assert np.allclose(x_pyad.grad, x_torch.grad.numpy(), atol=1e-5, equal_nan=True), "Input gradients mismatch"
+
+    # Compare projection gradients
+    assert np.allclose(mha_pyad.c_proj.W.grad, mha_torch.c_proj.weight.grad.numpy().T, atol=1e-5), "Proj W grad mismatch"
+    assert np.allclose(mha_pyad.c_proj.b.grad, mha_torch.c_proj.bias.grad.numpy(), atol=1e-5), "Proj b grad mismatch"
+    assert np.allclose(mha_pyad.c_attn.W.grad, mha_torch.c_attn.weight.grad.numpy().T, atol=1e-5), "qkv_proj W grad mismatch"
+    assert np.allclose(mha_pyad.c_attn.b.grad, mha_torch.c_attn.bias.grad.numpy(), atol=1e-5), "qkv_proj b grad mismatch"
+    
+    
+    
+def test_split():
+    import numpy as np
+    import torch
+    from pyad.new_core import Tensor
+
+    np.random.seed(0)
+    torch.manual_seed(0)
+
+    # Test 1D split
+    x_np = np.random.randn(8)
+    x = Tensor(x_np.copy())
+    xt = torch.tensor(x_np.copy(), dtype=torch.float64, requires_grad=True)
+
+    # Split into 4 chunks along axis 0
+    xs = x.split(2, axis=0)
+    xts = torch.split(xt, 2, dim=0)
+    for i in range(4):
+        assert np.allclose(xs[i].data, xts[i].detach().numpy(), atol=1e-8)
+
+    # Backward: sum all splits, then backward
+    s = sum(xs)
+    s.sum().backward()
+    sum_xt = sum(xts)
+    sum_xt.sum().backward()
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-8)
+
+    # Test 2D split along axis 1
+    x2_np = np.random.randn(3, 6)
+    x2 = Tensor(x2_np.copy())
+    xt2 = torch.tensor(x2_np.copy(), dtype=torch.float64, requires_grad=True)
+    xs2 = x2.split(2, axis=1)
+    xts2 = torch.split(xt2, 2, dim=1)
+    for i in range(3):
+        assert np.allclose(xs2[i].data, xts2[i].detach().numpy(), atol=1e-8)
+    s2 = sum(xs2)
+    s2.sum().backward()
+    sum_xt2 = sum(xts2)
+    sum_xt2.sum().backward()
+    assert np.allclose(x2.grad, xt2.grad.numpy(), atol=1e-8)
+    
+    
+    
+def test_layernorm_axes():
+    from pyad.new_core import Tensor, LayerNorm
+    B,T,C = 2,3,4
+    x_np = np.random.randn(B,T,C)
+    x = Tensor(x_np.copy())
+    ln = LayerNorm(C)
+    y = ln(x)
+    # mean/var per (B,T,*) slice over last dim ~ 0 / 1
+    m = y.data.mean(axis=2)
+    v = y.data.var(axis=2)
+    assert np.allclose(m, 0, atol=1e-5)
+    assert np.allclose(v, 1, atol=1e-4)

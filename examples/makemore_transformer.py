@@ -4,34 +4,22 @@ from torch.utils.data import Dataset
 from torch.utils.data.dataloader import DataLoader
 
 def generate(model, idx, max_new_tokens, temperature=1.0, do_sample=False, top_k=None):
-    """
-    Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-    the sequence max_new_tokens times, feeding the predictions back into the model each time.
-    Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-    """
     block_size = model.get_block_size()
+    idx = idx.cpu()  # ensure on CPU for NumPy
     for _ in range(max_new_tokens):
-        # if the sequence context is growing too long we must crop it at block_size
         idx_cond = idx if idx.size(1) <= block_size else idx[:, -block_size:]
-        # forward the model to get the logits for the index in the sequence
-        logits, _ = model(Tensor(idx_cond.detach().numpy()))
+        logits, _ = model(Tensor(idx_cond.numpy()))
         logits = torch.tensor(logits.data, dtype=torch.float32)
-        # pluck the logits at the final step and scale by desired temperature
         logits = logits[:, -1, :] / temperature
-        # optionally crop the logits to only the top k options
         if top_k is not None:
             v, _ = torch.topk(logits, top_k)
             logits[logits < v[:, [-1]]] = -float('Inf')
-        # apply softmax to convert logits to (normalized) probabilities
         probs = F.softmax(logits, dim=-1)
-        # either sample from the distribution or take the most likely element
         if do_sample:
             idx_next = torch.multinomial(probs, num_samples=1)
         else:
             _, idx_next = torch.topk(probs, k=1, dim=-1)
-        # append sampled index to the running sequence and continue
         idx = torch.cat((idx, idx_next), dim=1)
-
     return idx
 
 def print_samples(num=10):
@@ -256,18 +244,6 @@ if __name__ == '__main__':
         # logging
         if step % 10 == 0:
             print(f"step {step} | loss {loss.data:.4f} | step time {(t1-t0)*1000:.2f}ms")
-
-        # evaluate the model
-        if step > 0 and step % 500 == 0:
-            train_loss = evaluate(model, train_dataset, batch_size=100, max_batches=10)
-            test_loss  = evaluate(model, test_dataset,  batch_size=100, max_batches=10)
-            print(f"step {step} train loss: {train_loss} test loss: {test_loss}")
-            # save the model to disk if it has improved
-            # if best_loss is None or test_loss < best_loss:
-            #     out_path = os.path.join(args.work_dir, "model.pt")
-            #     print(f"test loss {test_loss} is the best so far, saving model to {out_path}")
-            #     torch.save(model.state_dict(), out_path)
-            #     best_loss = test_loss
 
         # sample from the model
         if step > 0 and step % 100 == 0:
