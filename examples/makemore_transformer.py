@@ -167,7 +167,7 @@ class ModelConfig:
     n_embd2: int = 64
     n_head: int = 4
     
-from pyad.new_core import Tensor, Transformer
+from pyad.new_core import Tensor, Transformer, RNN
 from pyad.optim import AdamW
 import argparse
 import time
@@ -212,7 +212,13 @@ if __name__ == '__main__':
                        n_layer=args.n_layer, n_head=args.n_head,
                        n_embd=args.n_embd, n_embd2=args.n_embd2)
     
-    model = Transformer(config)
+    
+    if args.type == 'transformer':
+        model = Transformer(config)
+    elif args.type == 'rnn':
+        model = RNN(config, cell_type='rnn')
+    elif args.type == 'gru':
+        model = RNN(config, cell_type='gru')
     # init optimizer
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, beta1=0.9, beta2=0.99, weight_decay=args.weight_decay)
 

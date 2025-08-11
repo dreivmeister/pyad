@@ -130,7 +130,6 @@ class Tensor:
         new_tensor = Tensor(self.data,self.prev,self.op,self.name)
         new_tensor.grad = self.grad
         new_tensor.grad_fn = self.grad_fn
-        new_tensor.broadcast_dim = self.broadcast_dim
         return new_tensor
             
     def __getitem__(self, key):
@@ -434,6 +433,26 @@ class Tensor:
         
         return out
     
+    @staticmethod
+    def stack(seq, axis=0):
+        # seq is a tuple/list of Tensors which should be stacked along a new axis
+        out_data = np.stack([a.data for a in seq], axis=axis)
+        out = Tensor(out_data, (*seq,), op=Tensor.stack)
+
+        # normalize axis to positive index w.r.t. out_data
+        axis_norm = axis if axis >= 0 else out_data.ndim + axis
+
+        def grad_fn(gradient):
+            # gradient has shape equal to out_data
+            # for each i, take the slice along the new axis and add to the corresponding input grad
+            for i, a in enumerate(seq):
+                slc = [slice(None)] * gradient.ndim
+                slc[axis_norm] = i
+                a.grad += gradient[tuple(slc)]
+        out.grad_fn = grad_fn
+
+        return out
+
     def dot(self, other):
         # this allows matrix multiply, matrix vector multiply and dot product
         other = promote_array_to_tensor(other)
@@ -996,6 +1015,8 @@ class CausalMultiHeadSelfAttention(Module):
         att = att + self.bias[:,:,:T,:T]
         att = att.softmax(axis=-1)
         y = att.bmm(v) # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        
+        # (B, T, nh, hs) -> (B, T, nh * hs = C)
         y = y.transpose((0, 2, 1, 3)).reshape((B, T, C)) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
@@ -1012,7 +1033,6 @@ class Block(Module):
         # head_size - embedding dimension in single head
         head_size = n_embd // num_heads
         self.attn = CausalMultiHeadSelfAttention(n_embd, num_heads, block_size)
-        #self.sa = MHA(block_size, n_embd, num_heads, head_size, dropout, do_mask)
         self.ffwd = FeedForward(n_embd)
         self.ln1 = LayerNorm(n_embd)
         self.ln2 = LayerNorm(n_embd)
@@ -1068,24 +1088,6 @@ class Transformer(Module):
     
     def parameters(self):
         return [*self.wte.parameters(), *self.wpe.parameters(), *self.ln_f.parameters(), *self.lm_head.parameters()] + [p for block in self.blocks for p in block.parameters()]
-    
-    
-    
-
-# class MHA(Module):
-#     def __init__(self, block_size, n_embd, num_heads, head_size, dropout=0.5, do_mask=False):
-#         self.heads = [CausalSelfAttention(block_size=block_size,n_embd=n_embd,head_size=head_size,mask=do_mask) for _ in range(num_heads)]
-#         self.proj = LinearLayer(n_embd, n_embd)
-#         #self.dropout = Dropout(dropout)
-
-#     def __call__(self, x):
-#         out = Tensor.concatenate([h(x) for h in self.heads],axis=-1)
-#         #out = self.dropout(self.proj(out))
-#         out = self.proj(out)
-#         return out
-
-#     def parameters(self):
-#         return [*self.proj.parameters()] + [p for head in self.heads for p in head.parameters()]
 
 class BatchNorm1D(Module):
     #https://github.com/renan-cunha/BatchNormalization/blob/master/src/feed_forward/layers.py
@@ -1118,34 +1120,7 @@ class BatchNorm1D(Module):
         
     
     def parameters(self):
-        return [self.gamma, self.beta]
-    
-# class LayerNorm(Module):
-#     # input of shape (N,D)
-#     # or other i think
-#     def __init__(self, normalized_shape):
-#         # normalized_shape is equivalent to num_features for input in form (N,num_features)
-#         if isinstance(normalized_shape, int):
-#             self.normalized_shape = (normalized_shape,)
-#         elif isinstance(normalized_shape, tuple):
-#             self.normalized_shape = normalized_shape
-        
-#         # i think this is correct but might not be
-#         self.axis_tuple = tuple([i for i in range(1, len(self.normalized_shape)+1)])
-        
-#         self.gamma = Tensor.ones(normalized_shape)
-#         self.beta = Tensor.zeros(normalized_shape)
-        
-#     def __call__(self, x):
-#         # x is of shape normalized_shape
-#         m = x.mean(axis=self.axis_tuple, keepdims=True)
-#         v = x.var(axis=self.axis_tuple, keepdims=True) + 1e-5
-
-#         return ((x - m)/v.sqrt())*self.gamma + self.beta
-        
-#     def parameters(self):
-#         return [self.gamma, self.beta]
-    
+        return [self.gamma, self.beta]    
     
 class LayerNorm(Module):
     def __init__(self, normalized_shape, eps=1e-5):
@@ -1157,7 +1132,7 @@ class LayerNorm(Module):
         self.beta  = Tensor.zeros(self.normalized_shape)
 
     def __call__(self, x):
-        # Normalize over the LAST len(normalized_shape) dims (GPT style)
+        # Normalize over the LAST len(normalized_shape) dims
         axes = tuple(range(x.ndim - len(self.normalized_shape), x.ndim))
         m = x.mean(axis=axes, keepdims=True)
         v = x.var(axis=axes, keepdims=True)  # already +eps in division below
@@ -1165,112 +1140,107 @@ class LayerNorm(Module):
 
     def parameters(self):
         return [self.gamma, self.beta]
-
-class TemporalAffine(Module):
-    """
-    Inputs:
-    batch_size - N
-    series_length - T
-    in_dim - D
-    out_dim - M
-    - x: Input data of shape (N, T, D)
-    - w: Weights of shape (D, M)
-    - b: Biases of shape (M,)
-    """
     
-    def __init__(self, batch_size, series_length, in_dim, out_dim):
-        self.W = Tensor(np.random.rand(in_dim, out_dim))
-        self.b = Tensor(np.random.rand(out_dim))
+    
+class RNNCell(Module):
+    """
+    the job of a 'Cell' is to:
+    take input at current time step x_{t} and the hidden state at the
+    previous time step h_{t-1} and return the resulting hidden state
+    h_{t} at the current timestep
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.xh_to_h = LinearLayer(config.n_embd + config.n_embd2, config.n_embd2)
+
+    def __call__(self, xt, hprev):
+        xh = Tensor.concatenate([xt, hprev], axis=1)
+        ht = self.xh_to_h(xh).tanh()
+        return ht
+
+    def parameters(self):
+        return [*self.xh_to_h.parameters()]
+    
+    
+class GRUCell(Module):
+    """
+    same job as RNN cell, but a bit more complicated recurrence formula
+    that makes the GRU more expressive and easier to optimize.
+    """
+    def __init__(self, config):
+        super().__init__()
+        # input, forget, output, gate
+        self.xh_to_z = LinearLayer(config.n_embd + config.n_embd2, config.n_embd2)
+        self.xh_to_r = LinearLayer(config.n_embd + config.n_embd2, config.n_embd2)
+        self.xh_to_hbar = LinearLayer(config.n_embd + config.n_embd2, config.n_embd2)
+
+    def __call__(self, xt, hprev):
+        # first use the reset gate to wipe some channels of the hidden state to zero
+        xh = Tensor.concatenate([xt, hprev], axis=1)
+        r = self.xh_to_r(xh).sigmoid()
+        hprev_reset = r * hprev
+        # calculate the candidate new hidden state hbar
+        xhr = Tensor.concatenate([xt, hprev_reset], axis=1)
+        hbar = self.xh_to_hbar(xhr).tanh()
+        # calculate the switch gate that determines if each channel should be updated at all
+        z = self.xh_to_z(xh).sigmoid()
+        # blend the previous hidden state and the new candidate hidden state
+        ht = (1 - z) * hprev + z * hbar
         
-        self.N = batch_size
-        self.T = series_length
-        self.D = in_dim
-        self.M = out_dim
-        
-    def __call__(self, x):
-        # x of shape (batch_size, series_length, out_dim)
-        return (x.reshape(self.N * self.T, self.D) @ self.W).reshape(self.N, self.T, self.M) + self.b
+        return ht
     
     def parameters(self):
-        return [self.W, self.b]
+        return [*self.xh_to_z.parameters(), *self.xh_to_r.parameters(), *self.xh_to_hbar.parameters()]
+    
+    
+class RNN(Module):
+    def __init__(self, config, cell_type):
+        super().__init__()
+        self.block_size = config.block_size
+        self.vocab_size = config.vocab_size
+        self.nembd2 = config.n_embd2 # hidden state dimension
+        #self.start = Tensor.zeros(1, config.n_embd2) # the starting hidden state
+        self.wte = Embedding(config.vocab_size, config.n_embd) # token embeddings table
+        if cell_type == 'rnn':
+            self.cell = RNNCell(config)
+        elif cell_type == 'gru':
+            self.cell = GRUCell(config)
+        self.lm_head = LinearLayer(config.n_embd2, self.vocab_size)
 
-class VanillaRNNBlock(Module):
-    def __init__(self, N, T, D, H, h0):
-        """
-        - batch size - N
-        - seq length - T
-        - elem dim   - D
-        - hidden dim - H
-        """
-        
-        self.N = N
-        self.T = T
-        self.H = H
-        self.prev_h = h0 # previous hidden state is h0
-        self.Wx = Tensor(np.random.rand(D,H))
-        self.Wh = Tensor(np.random.rand(H,H))
-        self.b = Tensor(np.random.rand(H))
-    
-    def rnn_step(self, x):
-        # x is of shape (N,D)
-        return (x @ self.Wx + self.prev_h @ self.Wh + self.b).tanh()
-    
-    
-    def __call__(self, x):
-        # x is of shape (N,T,D)
-        seq = []
-        
-        for i in range(self.T):
-            step_out = self.rnn_step(x[:,i,:])
-            seq.append(step_out)
-            self.prev_h = step_out
-        
-        return Tensor.concatenate(seq).reshape((self.N,self.T,self.H))
+    def get_block_size(self):
+        return self.block_size
+
+    def __call__(self, idx, targets=None):
+        b, t = idx.shape
+
+        # embed all the integers up front and all at once for efficiency
+        emb = self.wte(idx) # (b, t, n_embd)
+
+        # sequentially iterate over the inputs and update the RNN state each tick
+        hprev = Tensor.zeros((b, self.nembd2))
+        hiddens = []
+        for i in range(t):
+            xt = emb[:, i, :] # (b, n_embd)
+            ht = self.cell(xt, hprev) # (b, n_embd2) 
+            hprev = ht
+            hiddens.append(ht)
+
+        # decode the outputs
+        hidden = Tensor.stack(hiddens, 1) # (b, t, n_embd2)
+        logits = self.lm_head(hidden)
+
+        # if we are given some desired targets also calculate the loss
+        loss = None
+        if targets is not None:
+            loss = sparse_categorical_crossentropy_from_logits(
+                logits.reshape((-1, logits.shape[-1])), targets.reshape((-1,)), ignore_index=-1)
+
+        return logits, loss
     
     def parameters(self):
-        return [self.Wx, self.Wh, self.b]
+        return [*self.wte.parameters(), *self.cell.parameters(), *self.lm_head.parameters()]
 
-def vanilla_rnn_step(x, prev_h, Wx, Wh, b):
-    #https://github.com/jariasf/CS231n/blob/master/assignment3/cs231n/rnn_layers.py
-    """
-    all inputs are Tensors
-    Inputs:
-    - x: Input data for this timestep, of shape (N, D).
-    - prev_h: Hidden state from previous timestep, of shape (N, H)
-    - Wx: Weight matrix for input-to-hidden connections, of shape (D, H)
-    - Wh: Weight matrix for hidden-to-hidden connections, of shape (H, H)
-    - b: Biases of shape (H,)
-    """
-    
-    return (x @ Wx + prev_h @ Wh + b).tanh()
-    
-def vanilla_rnn(x, h0, Wx, Wh, b):
-    """
-    all inputs and outputs are tensors
-    Inputs:
-    - x: Input data for the entire timeseries, of shape (N, T, D).
-    - h0: Initial hidden state, of shape (N, H)
-    - Wx: Weight matrix for input-to-hidden connections, of shape (D, H)
-    - Wh: Weight matrix for hidden-to-hidden connections, of shape (H, H)
-    - b: Biases of shape (H,)
-    Returns a tuple of:
-    - h: Hidden states for the entire timeseries, of shape (N, T, H).
-    """
-    
-    # hacky solution incoming
-    seq = []
-    N, T, D = x.shape
-    H = h0.shape[1]
-    prev_h = h0
-    
-    for i in range(T):
-        prev_h = vanilla_rnn_step(x[:,i,:], prev_h, Wx, Wh, b)
-        seq.append(prev_h)
-    
-    return Tensor.concatenate(seq).reshape((N,T,H))
-    
-    
-    
+
 def softmax(logits, axis=-1):
     return logits.softmax(axis=axis)
 
