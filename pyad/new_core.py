@@ -111,6 +111,10 @@ class Tensor:
         return Tensor(np.random.rand(*shape))
     
     @staticmethod
+    def randn(shape):
+        return Tensor(np.random.randn(*shape))
+    
+    @staticmethod
     def uniform(low, high, shape):
         return Tensor(np.random.uniform(low,high,shape))
     
@@ -131,24 +135,36 @@ class Tensor:
         new_tensor.grad = self.grad
         new_tensor.grad_fn = self.grad_fn
         return new_tensor
-            
-    def __getitem__(self, key):
-        sliced_data = self.data[key]
-        try:
-            sliced_gradient = self.grad[key]
-        except TypeError:
-            sliced_gradient = 0
-        
-        out = Tensor(data=sliced_data, prev=(self,), op=self.__getitem__)
-        out.grad = sliced_gradient
-        out.name = self.name
-        
+    
+    def __getitem__(self, idx):
+        # Normalize index to tuple and convert Tensor/list indices to numpy arrays
+        if not isinstance(idx, tuple):
+            idx = (idx,)
+        norm_idx = []
+        advanced = False
+        for i in idx:
+            ii = i
+            if isinstance(ii, Tensor):
+                ii = ii.data
+            if isinstance(ii, list):
+                ii = np.array(ii)
+            # detect advanced indexing (integer/boolean array with ndim>0)
+            if isinstance(ii, np.ndarray) and ii.ndim > 0 and (np.issubdtype(ii.dtype, np.integer) or ii.dtype == bool):
+                advanced = True
+            norm_idx.append(ii)
+
+        y_data = self.data[tuple(norm_idx)]
+        out = Tensor(y_data, (self,), op=Tensor.__getitem__)
+
         def grad_fn(gradient):
-            if isinstance(self.grad, int) and self.grad == 0:
-                self.grad = np.zeros_like(self.data)
-            self.grad[key] += gradient
+            # scatter-add gradient back to self.grad at the selected indices
+            if advanced:
+                # use unbuffered accumulation for advanced indexing (handles repeated indices correctly)
+                np.add.at(self.grad, tuple(norm_idx), gradient)
+            else:
+                # regular slicing / ints / ellipsis / None
+                self.grad[tuple(norm_idx)] += gradient
         out.grad_fn = grad_fn
-        
         return out
     
     # def __setitem__(self, key, value):
@@ -452,6 +468,40 @@ class Tensor:
         out.grad_fn = grad_fn
 
         return out
+    
+    
+    def expand(self, *sizes):
+        # torch-like expand: -1 keeps size, can add leading dims, only expand dims of size 1
+        orig = self.data.shape
+        if len(sizes) < len(orig):
+            raise AssertionError("expand: target dims must be >= input dims")
+        padded = (1,) * (len(sizes) - len(orig)) + orig
+
+        target = []
+        for s_in, s_out in zip(padded, sizes):
+            if s_out == -1:
+                target.append(s_in)
+            else:
+                assert s_out == s_in or s_in == 1, f"expand: cannot expand {s_in} -> {s_out}"
+                target.append(int(s_out))
+
+        out_data = np.broadcast_to(self.data.reshape(padded), tuple(target))
+        out = Tensor(out_data, (self,), op=Tensor.expand)
+
+        # axes where broadcasting happened (s_in==1 and expanded >1), including added leading dims
+        reduce_axes = tuple(i for i, (s_in, s_out) in enumerate(zip(padded, target)) if s_in == 1 and s_out > 1)
+
+        def grad_fn(grad):
+            g = grad
+            if reduce_axes:
+                g = g.sum(axis=reduce_axes, keepdims=True)
+            # reshape back to original rank
+            g = g.reshape(padded).reshape(orig)
+            self.grad += g
+
+        out.grad_fn = grad_fn
+        return out
+    
 
     def dot(self, other):
         # this allows matrix multiply, matrix vector multiply and dot product
@@ -944,51 +994,14 @@ class Dropout(Module):
     
     def parameters(self):
         return []
-    
-from math import sqrt
-class CausalSelfAttention(Module): # Head
-    def __init__(self, block_size, n_embd, head_size, dropout=0.2, mask=False):
-        self.key = LinearLayer(n_embd, head_size, bias=False)
-        self.query = LinearLayer(n_embd, head_size, bias=False)
-        self.value = LinearLayer(n_embd, head_size, bias=False)
-        self.scale = 1 / sqrt(head_size)
-        self.do_mask = mask
-        if mask:
-            m = np.zeros((block_size,block_size))
-            m[np.triu_indices(block_size,1)] = float('-inf')
-            m = np.expand_dims(m, axis=0) # add batch dimension
-            #print(m)
-            self.mask = m
-        
-        #self.dropout = Dropout(dropout)
-        
-    def __call__(self, x):
-        B, T, C = x.shape
-        k = self.key(x) # (batch_size,block_size,token_dim) @ (n_embd, head_size) 
-        q = self.query(x) # (B,T,C)
-        
-        #print(q.shape, k.shape)
-        #wei = q @ k.transpose((0,2,1)) # transpose last two dims
-        wei = q.bmm(k.transpose((0,2,1))) * self.scale # (B, T, T) - attention weights
-        if self.do_mask:
-            wei = wei + self.mask[:, :T,:T]
-            #print(wei)
-        wei = wei.softmax(axis=2) # (B, T, T)
-        #print(wei)
-        #wei = self.dropout(wei)
-        
-        v = self.value(x)
-        out = wei.bmm(v)
-        return out
-    
-    def parameters(self):
-        return [*self.key.parameters(),*self.query.parameters(),*self.value.parameters()]
 
 from math import sqrt
 class CausalMultiHeadSelfAttention(Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
         assert n_embd % n_head == 0
+        self.head_size = n_embd // n_head # head size
+        self.scale = 1.0 / sqrt(self.head_size)
         # key, query, value projections for all heads, but in a batch
         self.c_attn = LinearLayer(n_embd, 3 * n_embd)
         # output projection
@@ -1005,13 +1018,12 @@ class CausalMultiHeadSelfAttention(Module):
         B, T, C = x.shape # batch size, sequence length, embedding dimensionality (n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k ,v  = self.c_attn(x).split(self.n_embd, axis=2)
-        hs = C // self.n_head # head size
-        k = k.reshape((B, T, self.n_head, hs)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
-        q = q.reshape((B, T, self.n_head, hs)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
-        v = v.reshape((B, T, self.n_head, hs)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
+        k = k.reshape((B, T, self.n_head, self.head_size)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
+        q = q.reshape((B, T, self.n_head, self.head_size)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
+        v = v.reshape((B, T, self.n_head, self.head_size)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        att = q.bmm(k.transpose((0, 1, 3, 2)) * (1.0 / sqrt(hs)))
+        att = q.bmm(k.transpose((0, 1, 3, 2))) * self.scale
         att = att + self.bias[:,:,:T,:T]
         att = att.softmax(axis=-1)
         y = att.bmm(v) # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -1025,13 +1037,47 @@ class CausalMultiHeadSelfAttention(Module):
     def parameters(self):
         return [*self.c_attn.parameters(), *self.c_proj.parameters()]
     
+class MultiHeadSelfAttention(Module):
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.head_size = n_embd // n_head # head size
+        self.scale = 1.0 / sqrt(self.head_size)
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = LinearLayer(n_embd, 3 * n_embd)
+        # output projection
+        self.c_proj = LinearLayer(n_embd, n_embd)
+        self.n_head = n_head
+        self.n_embd = n_embd
+
+    def __call__(self, x):
+        B, T, C = x.shape # batch size, sequence length, embedding dimensionality (n_embd)
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k ,v  = self.c_attn(x).split(self.n_embd, axis=2)
+        k = k.reshape((B, T, self.n_head, self.head_size)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
+        q = q.reshape((B, T, self.n_head, self.head_size)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
+        v = v.reshape((B, T, self.n_head, self.head_size)).transpose((0, 2, 1, 3)) # (B, nh, T, hs)
+
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        att = q.bmm(k.transpose((0, 1, 3, 2))) * self.scale
+        att = att.softmax(axis=-1)
+        y = att.bmm(v) # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        
+        # (B, T, nh, hs) -> (B, T, nh * hs = C)
+        y = y.transpose((0, 2, 1, 3)).reshape((B, T, C)) # re-assemble all head outputs side by side
+        # output projection
+        y = self.c_proj(y)
+        return y
+    
+    def parameters(self):
+        return [*self.c_attn.parameters(), *self.c_proj.parameters()]
+    
 class Block(Module):
-    def __init__(self, block_size, n_embd, num_heads, dropout=0.5, do_mask=False):
+    def __init__(self, block_size, n_embd, num_heads):
         # block_size - context_length - length of sample
         # n_embd - embedding_dimension - d_model
         # num_heads - number of heads in MHA
         # head_size - embedding dimension in single head
-        head_size = n_embd // num_heads
         self.attn = CausalMultiHeadSelfAttention(n_embd, num_heads, block_size)
         self.ffwd = FeedForward(n_embd)
         self.ln1 = LayerNorm(n_embd)
@@ -1117,7 +1163,6 @@ class BatchNorm1D(Module):
             return self.gamma*((x - m)/v.sqrt()) + self.beta
         # testing
         return self.gamma/self.running_var * x + (self.beta - (self.gamma*self.running_mean)/self.running_var)
-        
     
     def parameters(self):
         return [self.gamma, self.beta]    
@@ -1140,7 +1185,6 @@ class LayerNorm(Module):
 
     def parameters(self):
         return [self.gamma, self.beta]
-    
     
 class RNNCell(Module):
     """
@@ -1241,6 +1285,88 @@ class RNN(Module):
         return [*self.wte.parameters(), *self.cell.parameters(), *self.lm_head.parameters()]
 
 
+
+class GRUCell(Module):
+    """
+    same job as RNN cell, but a bit more complicated recurrence formula
+    that makes the GRU more expressive and easier to optimize.
+    """
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
+        # input, forget, output, gate
+        self.xh_to_z = LinearLayer(input_size + hidden_size, hidden_size)
+        self.xh_to_r = LinearLayer(input_size + hidden_size, hidden_size)
+        self.xh_to_hbar = LinearLayer(input_size + hidden_size, hidden_size)
+
+    def __call__(self, xt, hprev):
+        # xt - (b, input_size)
+        # hprev - (b, hidden_size)
+        # first use the reset gate to wipe some channels of the hidden state to zero
+        xh = Tensor.concatenate([xt, hprev], axis=1) # (b, input_size + hidden_size)
+        r = self.xh_to_r(xh).sigmoid()
+        hprev_reset = r * hprev
+        # calculate the candidate new hidden state hbar
+        xhr = Tensor.concatenate([xt, hprev_reset], axis=1)
+        hbar = self.xh_to_hbar(xhr).tanh()
+        # calculate the switch gate that determines if each channel should be updated at all
+        z = self.xh_to_z(xh).sigmoid()
+        # blend the previous hidden state and the new candidate hidden state
+        ht = (1 - z) * hprev + z * hbar
+        
+        return ht
+    
+    def parameters(self):
+        return [*self.xh_to_z.parameters(), *self.xh_to_r.parameters(), *self.xh_to_hbar.parameters()]
+    
+    
+class GRU(Module):
+    def __init__(self, input_size, hidden_size, num_layers=1):
+        super().__init__()
+        assert num_layers >= 1
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        # First layer takes input_size, subsequent layers take hidden_size as input
+        self.layers = [GRUCell(input_size if i == 0 else hidden_size, hidden_size) for i in range(num_layers)]
+        self.out_proj = LinearLayer(hidden_size, input_size)
+
+    def __call__(self, x, h0=None):
+        # x: (B, T, input_size)  (batch-first)
+        B, T, _ = x.shape
+
+        # Prepare initial hidden states
+        if h0 is None:
+            h_list = [Tensor.zeros((B, self.hidden_size)) for _ in range(self.num_layers)]
+        else:
+            # h0 can be Tensor of shape (num_layers, B, H) or list of Tensors [(B,H), ...]
+            if isinstance(h0, Tensor):
+                assert h0.ndim == 3 and h0.shape[0] == self.num_layers and h0.shape[1] == B and h0.shape[2] == self.hidden_size
+                h_list = [h0[i, :, :] for i in range(self.num_layers)]
+            else:
+                assert isinstance(h0, list) and len(h0) == self.num_layers
+                h_list = h0
+
+        out = x
+        h_last = []
+        for layer_idx, cell in enumerate(self.layers):
+            hprev = h_list[layer_idx]
+            ts = []
+            for t in range(T):
+                xt = out[:, t, :]   # (B, in_features)
+                hprev = cell(xt, hprev)  # (B, hidden_size)
+                ts.append(hprev)
+            # (B, T, hidden_size)
+            out = Tensor.stack(ts, axis=1)
+            h_last.append(hprev)
+
+        # h_n: (num_layers, B, hidden_size)
+        h_n = Tensor.stack(h_last, axis=0)
+        return out, h_n
+
+    def parameters(self):
+        return [p for layer in self.layers for p in layer.parameters()]
+
+
 def softmax(logits, axis=-1):
     return logits.softmax(axis=axis)
 
@@ -1306,29 +1432,3 @@ def sparse_categorical_crossentropy_from_logits(logits, targets, ignore_index=No
     
     # Compute mean of negative log-likelihood
     return -(true_probs + eps).log().mean()  # small epsilon to avoid log(0)
-
-
-def hinge_loss(logits, targets):
-    # logits is not a prob vector (columns dont sum to 1)
-    num_samples = logits.data.shape[0]
-    return 1./num_samples * (1. - targets * logits).relu().sum()
-
-def Attention(Q,K,V,mask):
-    # Q, K and V must be of the following shapes (Assumption)
-    # Q, K, and V are Tensors
-    # Q - (m, d_k)
-    # K - (n, d_k), K.T - (B, d_k, n)
-    # V - (n, d_v)
-    # Scaled Dot-Product Attention
-    # Attention(Q,K,V) = softmax((Q @ K.T) / sqrt(d_k)) @ V
-    d_k = Q.shape[1]
-    #d_v = V.shape[1]
-    scaling_factor = np.sqrt(d_k)
-    
-    D = Q @ K.transpose() # (m, n)
-    D = D / scaling_factor
-    if mask:
-        D = D + mask
-    D = softmax(D)
-    A = D @ V # (m, d_v)
-    return A

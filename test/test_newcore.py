@@ -1345,7 +1345,6 @@ def test_split():
     assert np.allclose(x2.grad, xt2.grad.numpy(), atol=1e-8)
     
     
-    
 def test_layernorm_axes():
     from pyad.new_core import Tensor, LayerNorm
     B,T,C = 2,3,4
@@ -1358,3 +1357,51 @@ def test_layernorm_axes():
     v = y.data.var(axis=2)
     assert np.allclose(m, 0, atol=1e-5)
     assert np.allclose(v, 1, atol=1e-4)
+    
+    
+def test_stack():
+    np.random.seed(0)
+    torch.manual_seed(0)
+
+    # Three inputs of same shape
+    A = np.random.randn(2, 3)
+    B = np.random.randn(2, 3)
+    C = np.random.randn(2, 3)
+
+    for axis in (0, 1, -1):
+        # pyad tensors
+        a = Tensor(A.copy())
+        b = Tensor(B.copy())
+        c = Tensor(C.copy())
+
+        # torch tensors
+        at = torch.tensor(A.copy(), dtype=torch.float64, requires_grad=True)
+        bt = torch.tensor(B.copy(), dtype=torch.float64, requires_grad=True)
+        ct = torch.tensor(C.copy(), dtype=torch.float64, requires_grad=True)
+
+        # Forward: stack
+        y = Tensor.stack([a, b, c], axis=axis)
+        yt = torch.stack([at, bt, ct], dim=axis)
+
+        # Check forward equivalence
+        assert np.allclose(y.data, yt.detach().numpy(), atol=1e-8)
+
+        # Build a per-slice weight along the new axis to test gradient slicing
+        v = np.array([2.0, 3.0, 5.0], dtype=np.float64)
+        axis_norm = axis if axis >= 0 else y.data.ndim + axis
+        w_shape = [1] * y.data.ndim
+        w_shape[axis_norm] = 3
+        w_np = v.reshape(w_shape)
+
+        # Weighted sum to create non-uniform gradients per slice
+        s = (y * Tensor(w_np)).sum()
+        s.backward()
+
+        wt = torch.tensor(w_np, dtype=torch.float64)
+        st = (yt * wt).sum()
+        st.backward()
+
+        # Check input gradients match torch
+        assert np.allclose(a.grad, at.grad.numpy(), atol=1e-8)
+        assert np.allclose(b.grad, bt.grad.numpy(), atol=1e-8)
+        assert np.allclose(c.grad, ct.grad.numpy(), atol=1e-8)
