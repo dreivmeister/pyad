@@ -412,6 +412,29 @@ def test_concat():
     assert np.allclose(z.data, zt.detach().numpy())
     assert np.allclose(x.grad, xt.grad.numpy())
     assert np.allclose(y.grad, yt.grad.numpy())
+    
+    
+def test_concat2():
+    x_np = np.random.rand(2, 3)
+    y_np = np.random.rand(2, 2)
+    
+    # Forward test
+    x = Tensor(x_np.copy())
+    y = Tensor(y_np.copy())
+    z = Tensor.concatenate([x, y], axis=1)
+
+    # Backward test
+    z.sum().backward()
+
+    # PyTorch comparison
+    xt = torch.tensor(x_np, dtype=torch.float64, requires_grad=True)
+    yt = torch.tensor(y_np, dtype=torch.float64, requires_grad=True)
+    zt = torch.cat((xt, yt), dim=1)
+    zt.sum().backward()
+
+    assert np.allclose(z.data, zt.detach().numpy())
+    assert np.allclose(x.grad, xt.grad.numpy())
+    assert np.allclose(y.grad, yt.grad.numpy())
 
 def test_mean():
     # Forward test

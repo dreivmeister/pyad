@@ -442,7 +442,10 @@ class Tensor:
         
         def grad_fn(gradient):
             # gradient is of shape out
-            gradient_split = np.split(gradient, n, axis=axis)
+            # Build cumulative split points along axis
+            sizes = [a.shape[axis] for a in seq]
+            split_points = np.cumsum(sizes)[:-1]  # exclude last
+            gradient_split = np.split(gradient, split_points, axis=axis)
             for i in range(n):
                 seq[i].grad += gradient_split[i]
         out.grad_fn = grad_fn
