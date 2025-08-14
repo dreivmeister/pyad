@@ -1,1 +1,9 @@
-- does my MHA Module match the makemore CausalSelfAttention
+- convtranspose2d
+- swish
+- log softmax
+- grop norm
+- rms norm
+- lstm cell
+- lstm
+- transformer encoder
+- transformer decoder
