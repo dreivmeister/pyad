@@ -1,5 +1,5 @@
 import numpy as np
-from new_core import Tensor, sparse_categorical_crossentropy_from_logits
+from pyad.new_core import Tensor, sparse_categorical_crossentropy_from_logits
 
 
 class Module: 
@@ -106,6 +106,28 @@ class Conv2d(Module):
     
     def parameters(self):
         return [self.kernels]
+    
+class ConvTranspose2d(Module):
+    # stride=1, padding=0 (output size grows by k-1 per spatial dim)
+    def __init__(self, in_channels, out_channels, kernel_size, bias=True):
+        super().__init__()
+        if isinstance(kernel_size, int):
+            kH = kW = kernel_size
+        else:
+            kH, kW = kernel_size
+        # kernels: (C_in, C_out, kH, kW) for transposed conv
+        self.kernels = Tensor.randn((in_channels, out_channels, kH, kW))
+        self.bias = Tensor.zeros((out_channels,)) if bias else None
+
+    def __call__(self, x):
+        return x.conv_transpose2d(self.kernels, bias=self.bias)
+
+    def parameters(self):
+        # mirror Conv2d style; include bias if you want it trained
+        params = [self.kernels]
+        if self.bias is not None:
+            params.append(self.bias)
+        return params
     
 class MaxPool2d(Module):
     def __init__(self, kernel_size, stride):
@@ -356,8 +378,6 @@ class RNNCell(Module):
     def parameters(self):
         return [*self.xh_to_h.parameters()]
     
-    
-
 class GRUCell(Module):
     """
     same job as RNN cell, but a bit more complicated recurrence formula
@@ -533,9 +553,6 @@ class GRU(Module):
 
     def parameters(self):
         return [p for layer in self.layers for p in layer.parameters()]
-    
-    
-    
     
     
 class RNN(Module):

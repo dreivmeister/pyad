@@ -710,6 +710,70 @@ class Tensor:
         out.grad_fn = grad_fn
         return out
     
+    def conv_transpose2d(self, kernels, bias=None):
+        """
+        Transposed convolution (a.k.a. deconvolution), stride=1, padding=0.
+        Input x: (N, C_in, H, W)
+        Kernels: (C_in, C_out, kH, kW)
+        Bias: (C_out,) or None
+        Output: (N, C_out, H + kH - 1, W + kW - 1)
+        """
+        kT = promote_array_to_tensor(kernels)
+        bT = promote_array_to_tensor(bias) if bias is not None else None
+
+        x = self.data
+        w = kT.data
+        assert x.ndim == 4 and w.ndim == 4, "conv_transpose2d expects 4D input and 4D kernels"
+        N, C_in, H, W = x.shape
+        Cin_w, C_out, kH, kW = w.shape
+        assert Cin_w == C_in, "kernels.shape[0] must equal input C_in"
+        out_H, out_W = H + kH - 1, W + kW - 1
+
+        out = np.zeros((N, C_out, out_H, out_W), dtype=x.dtype)
+        # y[n, cout] = sum_cin convolve2d(x[n, cin], w[cin, cout], mode='full')
+        for n in range(N):
+            for cout in range(C_out):
+                acc = 0
+                for cin in range(C_in):
+                    y = signal.convolve2d(x[n, cin], w[cin, cout], mode='full')
+                    acc += y
+                if bT is not None:
+                    acc += bT.data[cout]
+                out[n, cout] = acc
+
+        outT = Tensor(out, (self, kT) + ((bT,) if bT is not None else ()), op=Tensor.conv_transpose2d)
+
+        def grad_fn(grad):
+            # grad: (N, C_out, out_H, out_W)
+            # dL/dx[n, cin] = sum_cout correlate2d(grad[n, cout], w[cin, cout], mode='valid')
+            gx = np.zeros_like(x)
+            for n in range(N):
+                for cin in range(C_in):
+                    acc = 0
+                    for cout in range(C_out):
+                        g = signal.correlate2d(grad[n, cout], w[cin, cout], mode='valid')
+                        acc += g
+                    gx[n, cin] = acc
+            self.grad += gx
+
+            # dL/dw[cin, cout] = correlate2d(grad[n, cout], x[n, cin], mode='valid') summed over n
+            gw = np.zeros_like(w)
+            for cin in range(C_in):
+                for cout in range(C_out):
+                    acc = 0
+                    for n in range(N):
+                        g = signal.correlate2d(grad[n, cout], x[n, cin], mode='valid')
+                        acc += g
+                    gw[cin, cout] = acc
+            kT.grad += gw
+
+            if bT is not None:
+                # dL/db[cout] = sum over n,h,w of grad[n, cout, h, w]
+                bT.grad += grad.sum(axis=(0, 2, 3))
+
+        outT.grad_fn = grad_fn
+        return outT
+    
     def maxpool2d(self, kernel_height, kernel_width, stride):
         # all params are integers
         N, C, H, W = self.data.shape

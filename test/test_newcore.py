@@ -584,7 +584,7 @@ def test_maxpool2d():
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-6)
     
     
-from pyad.new_core import MLP
+from pyad.nn import MLP
 from pyad.optim import Adam
 def test_mlp_xor():
     # XOR dataset
@@ -635,9 +635,6 @@ def test_mlp_xor_diff_batch():
     loss2.backward()
 
 def test_linear_layer():
-    import torch
-    import numpy as np
-    from pyad.new_core import Tensor, LinearLayer
 
     # Set random seed for reproducibility
     np.random.seed(42)
@@ -757,7 +754,7 @@ def test_negative_log_likelihood():
     assert np.allclose(probs.grad, probs_t.grad.numpy(), atol=1e-6)
     
     
-from pyad.new_core import BatchNorm1D
+from pyad.nn import BatchNorm1D
 def test_batchnorm1d():
     np.random.seed(42)
 
@@ -790,7 +787,7 @@ def test_batchnorm1d():
     assert np.allclose(bn.beta.grad, bnt.bias.grad.numpy(), atol=1e-6), "Beta gradients do not match"
 
 
-from pyad.new_core import LayerNorm
+from pyad.nn import LayerNorm
 def test_layernorm():
     np.random.seed(42)
 
@@ -939,7 +936,7 @@ def test_bmm():
     
 
 #import torch
-from pyad.new_core import LinearLayer
+from pyad.nn import LinearLayer
 def test_linear_layer_3d():
     np.random.seed(42)
     torch.manual_seed(42)
@@ -1168,7 +1165,7 @@ def test_gelu_broadcast_chain():
     
     
 def test_feedforward_module():
-    from pyad.new_core import FeedForward
+    from pyad.nn import FeedForward
     
     class NewGELU(torch.nn.Module):
         """
@@ -1233,12 +1230,7 @@ def test_feedforward_module():
     assert np.allclose(ff_py.ll2.b.grad, ff_th.fc2.bias.grad.numpy(), atol=1e-6), "fc2.b grad mismatch"
     
 def test_mha_vs_torch_causal_self_attention():
-    # import numpy as np
-    # import torch
-    # import torch.nn as nn
-    # import torch.nn.functional as F
-    # import math
-    from pyad.new_core import Tensor, CausalMultiHeadSelfAttention
+    from pyad.nn import CausalMultiHeadSelfAttention
 
     class Config:
         block_size = 6
@@ -1328,10 +1320,6 @@ def test_mha_vs_torch_causal_self_attention():
     
     
 def test_split():
-    import numpy as np
-    import torch
-    from pyad.new_core import Tensor
-
     np.random.seed(0)
     torch.manual_seed(0)
 
@@ -1369,7 +1357,7 @@ def test_split():
     
     
 def test_layernorm_axes():
-    from pyad.new_core import Tensor, LayerNorm
+    from pyad.nn import LayerNorm
     B,T,C = 2,3,4
     x_np = np.random.randn(B,T,C)
     x = Tensor(x_np.copy())
@@ -1428,3 +1416,78 @@ def test_stack():
         assert np.allclose(a.grad, at.grad.numpy(), atol=1e-8)
         assert np.allclose(b.grad, bt.grad.numpy(), atol=1e-8)
         assert np.allclose(c.grad, ct.grad.numpy(), atol=1e-8)
+        
+        
+        
+def test_conv_transpose2d_vs_torch_forward_backward():
+    np.random.seed(0)
+    torch.manual_seed(0)
+
+    # Shapes
+    N, Cin, Cout, H, W = 2, 3, 4, 5, 6
+    kH, kW = 3, 2
+
+    # Random inputs
+    x_np = np.random.randn(N, Cin, H, W)
+    w_np = np.random.randn(Cin, Cout, kH, kW)  # (in_channels, out_channels, kH, kW) for conv_transpose2d
+    b_np = np.random.randn(Cout)
+
+    # pyad tensors
+    x = Tensor(x_np.copy())
+    w = Tensor(w_np.copy())
+    b = Tensor(b_np.copy())
+
+    # torch tensors
+    xt = torch.tensor(x_np.copy(), dtype=torch.float64, requires_grad=True)
+    wt = torch.tensor(w_np.copy(), dtype=torch.float64, requires_grad=True)
+    bt = torch.tensor(b_np.copy(), dtype=torch.float64, requires_grad=True)
+
+    # Forward
+    y = x.conv_transpose2d(w, bias=b)
+    yt = F.conv_transpose2d(xt, wt, bt, stride=1, padding=0)
+
+    # Shapes
+    assert y.data.shape == yt.shape, f"Output shape mismatch: {y.data.shape} vs {tuple(yt.shape)}"
+    # Values
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-8), "Forward outputs mismatch"
+
+    # Backward with random upstream gradient
+    g_np = np.random.randn(*y.data.shape)
+    y.backward(g_np)
+    yt.backward(torch.tensor(g_np, dtype=torch.float64))
+
+    # Compare grads
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-8), "Grad w.r.t. input mismatch"
+    assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-8), "Grad w.r.t. weight mismatch"
+    assert np.allclose(b.grad, bt.grad.numpy(), atol=1e-8), "Grad w.r.t. bias mismatch"
+
+
+def test_conv_transpose2d_no_bias_vs_torch():
+    np.random.seed(1)
+    torch.manual_seed(1)
+
+    # Smaller case
+    N, Cin, Cout, H, W = 1, 1, 2, 4, 3
+    kH, kW = 3, 3
+
+    x_np = np.random.randn(N, Cin, H, W)
+    w_np = np.random.randn(Cin, Cout, kH, kW)
+
+    x = Tensor(x_np.copy())
+    w = Tensor(w_np.copy())
+
+    xt = torch.tensor(x_np.copy(), dtype=torch.float64, requires_grad=True)
+    wt = torch.tensor(w_np.copy(), dtype=torch.float64, requires_grad=True)
+
+    y = x.conv_transpose2d(w, bias=None)
+    yt = F.conv_transpose2d(xt, wt, bias=None, stride=1, padding=0)
+
+    assert y.data.shape == yt.shape
+    assert np.allclose(y.data, yt.detach().numpy(), atol=1e-8)
+
+    # Scalar loss to test grads
+    y.sum().backward()
+    yt.sum().backward()
+
+    assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-8)
+    assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-8)
