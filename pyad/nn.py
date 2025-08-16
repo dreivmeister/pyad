@@ -158,8 +158,6 @@ class Dropout(Module):
     def parameters(self):
         return []
 
-
-
 class FeedForward(Module):
     def __init__(self, n_embd):
         self.ll1 = LinearLayer(n_embd, 4*n_embd, nonlin='gelu')
@@ -604,3 +602,24 @@ class RNN(Module):
     
     def parameters(self):
         return [*self.wte.parameters(), *self.cell.parameters(), *self.lm_head.parameters()]
+    
+
+def GCN(Module):
+    def __init__(self, adjacency_list, node_features):
+        super().__init__()
+        self.adjacency_list = adjacency_list
+        self.num_nodes = len(adjacency_list)
+        assert node_features.shape[0] == self.num_nodes
+        self.embeddings = node_features # (num_nodes, num_features) initial embeddings
+        self.W = LinearLayer(node_features.shape[1], node_features.shape[1], bias=False)
+        self.B = LinearLayer(node_features.shape[1], node_features.shape[1], bias=False)
+        
+    def __call__(self):
+        for node in range(self.num_nodes):
+            neighbors = self.adjacency_list.get(node, [])
+            neighbor_embeddings = self.embeddings[neighbors] # (num_neighbors, num_features)
+            neighbor_mean = neighbor_embeddings.mean(axis=0) # (num_features,) mean neighbor embeddings
+            self.embeddings[node] = (self.W(neighbor_mean) + self.B(self.embeddings[node])).relu()
+
+    def parameters(self):
+        return [self.W.parameters(), self.B.parameters()]

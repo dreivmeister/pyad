@@ -35,9 +35,7 @@ class Tensor:
         self.grad = np.zeros_like(self.data, dtype=np.float64)
         self.op = op
         self.grad_fn = lambda x: None
-        #self.broadcast_dim = None
-        self.name = name
-        
+
     def __repr__(self):
         if self.data.ndim < 2:
             return f'Tensor(data={self.data}, grad={self.grad})'    
@@ -131,7 +129,7 @@ class Tensor:
         return self.data.dtype
             
     def copy(self):
-        new_tensor = Tensor(self.data,self.prev,self.op,self.name)
+        new_tensor = Tensor(self.data,self.prev,self.op)
         new_tensor.grad = self.grad
         new_tensor.grad_fn = self.grad_fn
         return new_tensor
@@ -167,27 +165,24 @@ class Tensor:
         out.grad_fn = grad_fn
         return out
     
-    # def __setitem__(self, key, value):
-    #     # value is a tensor
-    #     self.data[key] = value.data
-    #     try:
-    #         self.grad[key] = value.grad
-    #     except TypeError:
-    #         self.grad = value.grad
+    def __setitem__(self, key, value):
+        # value is a tensor
+        self.data[key] = value.data
+        try:
+            self.grad[key] = value.grad
+        except TypeError:
+            self.grad = value.grad
         
-    #     # or also:
-    #     #value.prev.add(value)
-    #     self.prev = (value,)
-    #     self.op = self.__setitem__
+        # or also:
+        #value.prev.add(value)
+        self.prev = (value,)
+        self.op = self.__setitem__
         
-    #     def grad_fn(gradient):
-    #         if isinstance(value.grad, int) and value.grad == 0:
-    #             value.grad = np.zeros_like(value.data)
-    #         value.grad += gradient[key]
-    #     self.grad_fn = grad_fn
-        
-    #     self.broadcast_dim = value.broadcast_dim
-    #     self.name = value.name
+        def grad_fn(gradient):
+            if isinstance(value.grad, int) and value.grad == 0:
+                value.grad = np.zeros_like(value.data)
+            value.grad += gradient[key]
+        self.grad_fn = grad_fn
     
     @staticmethod
     def checkbroadcast(a, grad_a):
