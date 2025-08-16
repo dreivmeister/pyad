@@ -105,8 +105,11 @@ class Conv2d(Module):
         return x.conv2d(self.kernels, bias=self.bias)
     
     def parameters(self):
-        return [self.kernels]
-    
+        params = [self.kernels]
+        if self.bias is not None:
+            params.append(self.bias)
+        return params
+
 class ConvTranspose2d(Module):
     # stride=1, padding=0 (output size grows by k-1 per spatial dim)
     def __init__(self, in_channels, out_channels, kernel_size, bias=True):
