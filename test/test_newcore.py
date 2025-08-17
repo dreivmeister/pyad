@@ -1491,3 +1491,203 @@ def test_conv_transpose2d_no_bias_vs_torch():
 
     assert np.allclose(x.grad, xt.grad.numpy(), atol=1e-8)
     assert np.allclose(w.grad, wt.grad.numpy(), atol=1e-8)
+    
+    
+def test_setitem_slice_and_broadcast_grad():
+    np.random.seed(0)
+
+    # x is produced from u so we can verify gradient only flows through non-overwritten region
+    u = Tensor(np.random.randn(3, 4))
+    x = u * 3.0
+
+    # value has shape (3,1) and will broadcast to (3,2)
+    v = Tensor(np.ones((3, 1)))
+    # Assign to a slice (first two columns)
+    x[:, :2] = v
+
+    # Forward data check: left block equals v (broadcast), right block unchanged from u*3
+    assert np.allclose(x.data[:, :2], np.ones((3, 2)))
+    assert np.allclose(x.data[:, 2:], (u.data * 3.0)[:, 2:])
+
+    # Backward: s = sum(x)
+    s = x.sum()
+    s.backward()
+
+    # Grad to u: only through non-overwritten region (cols 2,3), scaled by 3.0
+    expected_u_grad = np.zeros_like(u.data)
+    expected_u_grad[:, 2:] = 3.0  # d(sum)/dx = 1, times 3 from x = u*3
+    assert np.allclose(u.grad, expected_u_grad)
+
+    # Grad to v: sum over broadcasted dimension (axis=1), since (3,1) -> (3,2)
+    # Each row received two ones from the assigned columns
+    expected_v_grad = np.full((3, 1), 2.0)
+    assert np.allclose(v.grad, expected_v_grad)
+
+
+def test_setitem_advanced_index_and_scalar_mask():
+    np.random.seed(1)
+
+    # Advanced indexing with repeated indices
+    u = Tensor(np.random.randn(5))
+    x = u + 0.0  # make x depend on u
+    idx = [0, 0, 3]  # repeated index 0
+    val = Tensor(np.array([10.0, 20.0, 30.0]))
+    x[idx] = val
+
+    # Check data mutation
+    expected = (u.data + 0.0).copy()
+    expected[idx] = val.data
+    assert np.allclose(x.data, expected)
+
+    # Backward
+    x.sum().backward()
+
+    # Grad to u: ones everywhere except overwritten indices become zero
+    expected_u_grad = np.ones_like(u.data)
+    expected_u_grad[0] = 0.0  # overwritten twice, still zero
+    expected_u_grad[3] = 0.0
+    assert np.allclose(u.grad, expected_u_grad)
+
+    # Grad to val: one per occurrence (including repeats)
+    expected_val_grad = np.ones_like(val.data)
+    assert np.allclose(val.grad, expected_val_grad)
+
+    # Boolean mask with scalar assignment (broadcast to all True positions)
+    u2 = Tensor(np.random.randn(2, 3))
+    x2 = u2 * 5.0
+    mask = x2.data > 0.0  # arbitrary boolean mask based on current data
+    scalar = Tensor(2.0)
+    x2[mask] = scalar
+
+    # Data check: masked positions equal 2.0
+    assert np.allclose(x2.data[mask], 2.0)
+
+    # Backward
+    x2.sum().backward()
+
+    # Grad to u2: only unmasked positions flow, scaled by 5.0
+    expected_u2_grad = np.zeros_like(u2.data)
+    expected_u2_grad[~mask] = 5.0
+    assert np.allclose(u2.grad, expected_u2_grad)
+
+    # Grad to scalar: number of True positions (each contributes 1)
+    expected_scalar_grad = float(mask.sum())
+    assert np.allclose(scalar.grad, expected_scalar_grad)
+    
+    
+def test_setitem_slice_broadcast_vs_torch():
+    np.random.seed(123)
+    torch.manual_seed(123)
+
+    # pyad graph
+    u = Tensor(np.random.randn(3, 4))
+    x = u * 3.0
+    v = Tensor(np.ones((3, 1)))  # will broadcast to (3,2)
+    x[:, :2] = v  # slice assignment with broadcast
+
+    # torch reference (no in-place): y_ref = xt*(1-mask) + v_expanded*mask
+    ut = torch.tensor(u.data.copy(), dtype=torch.float64, requires_grad=True)
+    xt = ut * 3.0
+    vt = torch.ones((3, 1), dtype=torch.float64, requires_grad=True)
+
+    mask = torch.zeros_like(xt)
+    mask[:, :2] = 1.0
+    v_expanded = vt.expand(-1, 2)
+    yt = xt * (1.0 - mask) + torch.cat([v_expanded, torch.zeros(3, 2, dtype=torch.float64)], dim=1)
+
+    # Compare forward
+    assert np.allclose(x.data, yt.detach().numpy(), atol=1e-8)
+
+    # Backward
+    x.sum().backward()
+    yt.sum().backward()
+
+    # Compare grads
+    assert np.allclose(u.grad, ut.grad.numpy(), atol=1e-8)
+    assert np.allclose(v.grad, vt.grad.numpy(), atol=1e-8)
+    
+    
+# def test_setitem_advanced_duplicates_vs_torch():
+#     np.random.seed(321)
+#     torch.manual_seed(321)
+
+#     # Advanced indexing with duplicates
+#     idx_list = [0, 0, 3]  # last-wins at position 0
+#     val_np = np.array([10.0, 20.0, 30.0], dtype=np.float64)
+
+#     # pyad
+#     u = Tensor(np.random.randn(5))
+#     x = u + 0.0
+#     val = Tensor(val_np.copy())
+#     x[idx_list] = val
+
+#     # torch reference (functional, no in-place), last-wins semantics
+#     ut = torch.tensor(u.data.copy(), dtype=torch.float64, requires_grad=True)
+#     vt = torch.tensor(val_np.copy(), dtype=torch.float64, requires_grad=True)
+
+#     # Build one-hot selector and "keep" mask for last occurrence
+#     idx_t = torch.tensor(idx_list, dtype=torch.long)
+#     N = ut.numel()
+#     K = idx_t.numel()
+#     one_hot = F.one_hot(idx_t, num_classes=N).double()  # (K, N)
+
+#     # keep[k] = 1 if idx_list[k] is the last occurrence of that index
+#     keep = torch.zeros(K, dtype=torch.float64)
+#     seen = set()
+#     for k in reversed(range(K)):
+#         if int(idx_list[k]) not in seen:
+#             keep[k] = 1.0
+#             seen.add(int(idx_list[k]))
+
+#     # Mask of positions being assigned
+#     mask_any = torch.clamp(one_hot.sum(dim=0), max=1.0)  # (N,)
+#     # Assigned values with last-wins
+#     assigned = (one_hot * (keep.view(-1, 1) * vt.view(-1, 1))).sum(dim=0)  # (N,)
+
+#     yt = ut * (1.0 - mask_any) + assigned  # final vector
+
+#     # Compare forward
+#     assert np.allclose(x.data, yt.detach().numpy(), atol=1e-8)
+
+#     # Backward
+#     x.sum().backward()
+#     yt.sum().backward()
+
+#     # Compare grads
+#     assert np.allclose(u.grad, ut.grad.numpy(), atol=1e-8)
+
+#     # For val grads: only last occurrences contribute (here [0,1,1])
+#     assert np.allclose(val.grad, vt.grad.numpy(), atol=1e-8)
+    
+    
+# ...existing code...
+def test_setitem_embedding():
+    np.random.seed(123)
+    torch.manual_seed(123)
+
+    # pyad graph
+    u = Tensor(np.random.randn(5, 4))
+    x = u + 0.0
+    idx = 1  # single index
+    val = Tensor(np.random.randn(4,))
+    x[idx] = val
+
+    # torch reference (functional, no in-place)
+    ut = torch.tensor(u.data.copy(), dtype=torch.float64, requires_grad=True)
+    xt = ut + 0.0
+    idx_t = torch.tensor(np.array([idx]), dtype=torch.long)
+    # require grad on the assigned value to compare grads
+    val_t = torch.tensor(val.data, dtype=torch.float64, requires_grad=True)
+
+    xt[idx_t] = val_t
+
+    # Compare forward
+    assert np.allclose(x.data, xt.detach().numpy(), atol=1e-8)
+
+    # Backward
+    x.sum().backward()
+    xt.sum().backward()
+
+    # Compare grads
+    assert np.allclose(u.grad, ut.grad.numpy(), atol=1e-8)
+    assert np.allclose(val.grad, val_t.grad.numpy(), atol=1e-8)

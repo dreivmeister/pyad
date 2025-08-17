@@ -165,23 +165,57 @@ class Tensor:
         out.grad_fn = grad_fn
         return out
     
-    def __setitem__(self, key, value):
-        # value is a tensor
-        self.data[key] = value.data
-        try:
-            self.grad[key] = value.grad
-        except TypeError:
-            self.grad = value.grad
-        
-        # or also:
-        #value.prev.add(value)
-        self.prev = (value,)
-        self.op = self.__setitem__
-        
+    def __setitem__(self, idx, value):
+        # Ensure value is a Tensor
+        value = value if isinstance(value, Tensor) else Tensor(value)
+
+        # Normalize index to tuple and detect advanced indexing
+        if not isinstance(idx, tuple):
+            idx = (idx,)
+        norm_idx = []
+        advanced = False
+        for i in idx:
+            ii = i
+            if isinstance(ii, Tensor):
+                ii = ii.data
+            if isinstance(ii, list):
+                ii = np.array(ii)
+            if isinstance(ii, np.ndarray) and ii.ndim > 0 and (np.issubdtype(ii.dtype, np.integer) or ii.dtype == bool):
+                advanced = True
+            norm_idx.append(ii)
+        norm_idx = tuple(norm_idx)
+
+        # Perform the in-place data assignment (NumPy handles broadcasting)
+        self.data[norm_idx] = value.data
+
+        # Chain autograd: keep previous parents and add 'value' as a new parent
+        old_prev = self.prev
+        old_grad_fn = self.grad_fn
+        self.prev = tuple(old_prev) + (value,)
+        self.op = Tensor.__setitem__
+
         def grad_fn(gradient):
-            if isinstance(value.grad, int) and value.grad == 0:
-                value.grad = np.zeros_like(value.data)
-            value.grad += gradient[key]
+            # Split the upstream gradient:
+            # - Part for self: zero out the region that was overwritten
+            # - Part for value: the gradient of the assigned slice (with broadcasting reduction)
+            grad_to_self = np.array(gradient, copy=True)
+            # Zero out the assigned slice for self's chain
+            if advanced:
+                # For advanced indexing, set the selected region to zero
+                grad_to_self[norm_idx] = 0
+            else:
+                grad_to_self[norm_idx] = 0
+
+            # Propagate to self's original parents
+            if old_grad_fn is not None:
+                old_grad_fn(grad_to_self)
+
+            # Propagate to value
+            grad_to_value = gradient[norm_idx]
+            # Reduce over broadcasted dims so it matches value.data shape
+            grad_to_value = Tensor.checkbroadcast(value, grad_to_value)
+            value.grad += grad_to_value
+
         self.grad_fn = grad_fn
     
     @staticmethod

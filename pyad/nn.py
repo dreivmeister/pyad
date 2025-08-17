@@ -604,22 +604,28 @@ class RNN(Module):
         return [*self.wte.parameters(), *self.cell.parameters(), *self.lm_head.parameters()]
     
 
-def GCN(Module):
-    def __init__(self, adjacency_list, node_features):
+class GCN(Module):
+    def __init__(self, num_nodes, num_features, nonlin=None):
         super().__init__()
-        self.adjacency_list = adjacency_list
-        self.num_nodes = len(adjacency_list)
-        assert node_features.shape[0] == self.num_nodes
-        self.embeddings = node_features # (num_nodes, num_features) initial embeddings
-        self.W = LinearLayer(node_features.shape[1], node_features.shape[1], bias=False)
-        self.B = LinearLayer(node_features.shape[1], node_features.shape[1], bias=False)
-        
-    def __call__(self):
+        self.num_nodes = num_nodes
+        self.W = LinearLayer(num_features, num_features, bias=False)
+        self.B = LinearLayer(num_features, num_features, bias=False)
+        self.nonlin = nonlin
+
+    def __call__(self, adjacency_list, initial_node_features):
+        # [[0, 1], [0, 2], [1, 2], []]
+        embeddings = initial_node_features
         for node in range(self.num_nodes):
-            neighbors = self.adjacency_list.get(node, [])
-            neighbor_embeddings = self.embeddings[neighbors] # (num_neighbors, num_features)
-            neighbor_mean = neighbor_embeddings.mean(axis=0) # (num_features,) mean neighbor embeddings
-            self.embeddings[node] = (self.W(neighbor_mean) + self.B(self.embeddings[node])).relu()
+            neighbors = adjacency_list[node]
+            if len(neighbors) == 0:
+                act = self.B(embeddings[node])
+                embeddings[node] = getattr(act, self.nonlin)() if self.nonlin else act
+            else:
+                neighbor_embeddings = embeddings[neighbors] # (num_neighbors, num_features)
+                neighbor_mean = neighbor_embeddings.mean(axis=0) # (num_features,) mean neighbor embeddings
+                act = self.W(neighbor_mean) + self.B(embeddings[node])
+                embeddings[node] = getattr(act, self.nonlin)() if self.nonlin else act
+        return embeddings
 
     def parameters(self):
-        return [self.W.parameters(), self.B.parameters()]
+        return [*self.W.parameters(), *self.B.parameters()]
