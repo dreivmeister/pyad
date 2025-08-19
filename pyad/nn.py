@@ -629,3 +629,33 @@ class GCN(Module):
 
     def parameters(self):
         return [*self.W.parameters(), *self.B.parameters()]
+    
+    
+class GAT(Module):
+    def __init__(self, num_nodes, num_features, attention_mechanism, nonlin=None):
+        self.num_nodes = num_nodes
+        self.W = LinearLayer(num_features, num_features, bias=False)
+        self.attention_mechanism = attention_mechanism
+        self.nonlin = nonlin
+        
+    def __call__(self, adjacency_list, initial_node_features):
+        embeddings = initial_node_features
+        for node in range(self.num_nodes):
+            neighbors = adjacency_list[node]
+            if len(neighbors) == 0:
+                self_attention = self.attention_mechanism(embeddings[node], embeddings[node])
+                new_embedding = self.W(self_attention * embeddings[node])
+            else:
+                neighbor_embeddings = embeddings[neighbors]
+                # attention of node to each of its neighbors
+                self_attention = self.attention_mechanism(embeddings[node], embeddings[node])
+                attention_weights = self.attention_mechanism(embeddings[node], neighbor_embeddings)
+                attention_weights = attention_weights.reshape((len(neighbors), -1))  # (num_neighbors, 1)
+                new_embedding = self.W((neighbor_embeddings.transpose()).dot(attention_weights) + self_attention * embeddings[node])
+            if self.nonlin:
+                new_embedding = getattr(new_embedding, self.nonlin)()
+            embeddings[node] = new_embedding
+        return embeddings
+
+    def parameters(self):
+        return [*self.W.parameters(), *self.attention_mechanism.parameters()]
