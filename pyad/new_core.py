@@ -127,7 +127,13 @@ class Tensor:
     @property
     def dtype(self):
         return self.data.dtype
-            
+    
+    def xavier_uniform(self):
+        fan_in = self.shape[0]
+        fan_out = self.shape[1]
+        limit = np.sqrt(6 / (fan_in + fan_out))
+        self.data = np.random.uniform(-limit, limit, self.shape)
+
     def copy(self):
         new_tensor = Tensor(self.data,self.prev,self.op)
         new_tensor.grad = self.grad
@@ -503,11 +509,12 @@ class Tensor:
     
     
     def expand(self, *sizes):
-        # torch-like expand: -1 keeps size, can add leading dims, only expand dims of size 1
+        # torch-like expand: -1 keeps size, can add trailing dims, only expand dims of size 1
         orig = self.data.shape
         if len(sizes) < len(orig):
             raise AssertionError("expand: target dims must be >= input dims")
-        padded = (1,) * (len(sizes) - len(orig)) + orig
+        # align original dimensions to the LEFT (torch semantics when new dims are appended)
+        padded = tuple(orig) + (1,) * (len(sizes) - len(orig))
 
         target = []
         for s_in, s_out in zip(padded, sizes):
@@ -520,15 +527,54 @@ class Tensor:
         out_data = np.broadcast_to(self.data.reshape(padded), tuple(target))
         out = Tensor(out_data, (self,), op=Tensor.expand)
 
-        # axes where broadcasting happened (s_in==1 and expanded >1), including added leading dims
+        # axes where broadcasting happened (s_in==1 and expanded >1), including added trailing dims
         reduce_axes = tuple(i for i, (s_in, s_out) in enumerate(zip(padded, target)) if s_in == 1 and s_out > 1)
 
         def grad_fn(grad):
             g = grad
             if reduce_axes:
                 g = g.sum(axis=reduce_axes, keepdims=True)
-            # reshape back to original rank
+            # reshape back to padded then to original
             g = g.reshape(padded).reshape(orig)
+            self.grad += g
+
+        out.grad_fn = grad_fn
+        return out
+    
+    
+    def unsqueeze(self, axis):
+        """
+        Insert dimension(s) of size 1 at the specified axis (int) or sequence of axes (list/tuple).
+        Supports negative indices and multiple axes applied in order (like torch.unsqueeze).
+        """
+        # normalize axes to list
+        if isinstance(axis, (list, tuple)):
+            axes_in = [int(a) for a in axis]
+        else:
+            axes_in = [int(axis)]
+
+        out_data = self.data
+        applied_axes = []
+        curr_ndim = out_data.ndim
+        for a in axes_in:
+            # convert negative axis relative to the current ndim (insertion can be at end)
+            if a < 0:
+                a = a + curr_ndim + 1
+            assert 0 <= a <= curr_ndim, f"unsqueeze: axis {a} out of range for ndim {curr_ndim}"
+            out_data = np.expand_dims(out_data, axis=a)
+            applied_axes.append(a)
+            curr_ndim += 1
+
+        out = Tensor(out_data, (self,), op=Tensor.unsqueeze)
+
+        def grad_fn(gradient):
+            g = gradient
+            # collapse inserted axes in reverse order; if axis was broadcasted later,
+            # sum over that axis first to reduce to size 1, then squeeze.
+            for a in reversed(applied_axes):
+                if g.shape[a] != 1:
+                    g = g.sum(axis=a, keepdims=True)
+                g = np.squeeze(g, axis=a)
             self.grad += g
 
         out.grad_fn = grad_fn
