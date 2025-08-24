@@ -1691,3 +1691,63 @@ def test_setitem_embedding():
     # Compare grads
     assert np.allclose(u.grad, ut.grad.numpy(), atol=1e-8)
     assert np.allclose(val.grad, val_t.grad.numpy(), atol=1e-8)
+    
+    
+    
+def test_unsqueeze_basic_forward_backward():
+    np.random.seed(0)
+    torch.manual_seed(0)
+
+    a = np.random.randn(2, 3)
+    t = Tensor(a.copy())
+    xt = torch.tensor(a.copy(), dtype=torch.float64, requires_grad=True)
+
+    u = t.unsqueeze(0)       # (1,2,3)
+    ut = xt.unsqueeze(0)     # (1,2,3)
+
+    assert u.data.shape == ut.detach().numpy().shape
+
+    s = u.sum()
+    s.backward()
+    ut.sum().backward()
+
+    assert np.allclose(t.grad, xt.grad.numpy())
+
+def test_unsqueeze_multiple_and_expand_grad():
+    np.random.seed(1)
+    torch.manual_seed(1)
+
+    a = np.random.randn(2, 1)
+    t = Tensor(a.copy())
+    xt = torch.tensor(a.copy(), dtype=torch.float64, requires_grad=True)
+
+    # insert a leading dim, then expand
+    u = t.unsqueeze(0)                 # (1,2,1)
+    v = u.expand(3, 2, 1)              # (3,2,1)
+    vt = xt.unsqueeze(0).expand(3, 2, 1)
+
+    assert v.data.shape == vt.detach().numpy().shape
+
+    v.sum().backward()
+    vt.sum().backward()
+
+    assert np.allclose(t.grad, xt.grad.numpy())
+
+def test_unsqueeze_negative_and_multiple_axes():
+    np.random.seed(2)
+    torch.manual_seed(2)
+
+    a = np.random.randn(4, 5)
+    t = Tensor(a.copy())
+    xt = torch.tensor(a.copy(), dtype=torch.float64, requires_grad=True)
+
+    # unsqueeze at axis 1 then at last position using negative index
+    u = t.unsqueeze(1).unsqueeze(-1)   # expected shape (4,1,5,1)
+    ut = xt.unsqueeze(1).unsqueeze(-1)
+
+    assert u.data.shape == ut.detach().numpy().shape
+
+    u.sum().backward()
+    ut.sum().backward()
+
+    assert np.allclose(t.grad, xt.grad.numpy())

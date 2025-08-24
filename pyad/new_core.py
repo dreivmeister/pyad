@@ -579,7 +579,6 @@ class Tensor:
 
         out.grad_fn = grad_fn
         return out
-    
 
     def dot(self, other):
         # this allows matrix multiply, matrix vector multiply and dot product
