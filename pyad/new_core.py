@@ -29,8 +29,8 @@ def transpose_last_two(shape):
 
 
 class Tensor:    
-    def __init__(self, data, prev=(), op=lambda x: None, name=None, *args, **kwargs):
-        self.data = np.asarray(data, dtype=np.float64)
+    def __init__(self, data, prev=(), op=lambda x: None, dtype = np.float64, *args, **kwargs):
+        self.data = np.asarray(data, dtype=dtype)
         self.prev = prev
         self.grad = np.zeros_like(self.data, dtype=np.float64)
         self.op = op
@@ -116,6 +116,16 @@ class Tensor:
     def uniform(low, high, shape):
         return Tensor(np.random.uniform(low,high,shape))
     
+    @staticmethod
+    def multinomial(probs, num_samples):
+        # Sample from a multinomial distribution
+        return Tensor(np.random.multinomial(num_samples, probs.data.flatten()))
+    
+    def item(self):
+        if self.data.ndim == 0:
+            return self.data[0]
+        raise ValueError("Cannot convert to scalar")
+
     @property
     def shape(self):
         return self.data.shape
@@ -128,6 +138,13 @@ class Tensor:
     def dtype(self):
         return self.data.dtype
     
+    def numpy(self):
+        return self.data
+
+    def astype(self, dtype):
+        self.data.astype(dtype)
+        self.grad.astype(dtype)
+
     def xavier_uniform(self):
         fan_in = self.shape[0]
         fan_out = self.shape[1]
@@ -1056,3 +1073,51 @@ def sparse_categorical_crossentropy_from_logits(logits, targets, ignore_index=No
     
     # Compute mean of negative log-likelihood
     return -(true_probs + eps).log().mean()  # small epsilon to avoid log(0)
+
+
+def smooth_l1_loss(preds, targets, beta=1.0):
+    """
+    Smooth L1 loss (Huber-like) compatible with pyad Tensor autograd.
+
+    loss(x) = 0.5 * x^2 / beta     if |x| < beta
+            = |x| - 0.5 * beta     otherwise
+
+    Args:
+        preds: Tensor of predictions
+        targets: Tensor of targets (broadcastable to preds)
+        beta: transition point (float > 0)
+        reduction: 'mean'
+
+    Returns:
+        Tensor: loss (scalar)
+    """
+    assert isinstance(preds, Tensor) and isinstance(targets, Tensor)
+    x = preds.data - targets.data
+    abs_x = np.abs(x)
+    cond = abs_x < beta
+    # elementwise loss
+    elem = np.where(cond, 0.5 * (x ** 2) / beta, abs_x - 0.5 * beta)
+    # reduction
+    out_data = elem.mean()
+
+    out = Tensor(out_data, (preds, targets))
+
+    def grad_fn(gradient):
+        # derivative w.r.t. x (elementwise)
+        d_elem_dx = np.where(cond, x / beta, np.sign(x))  # shape == broadcasted shape
+
+        factor = 1.0 / np.prod(d_elem_dx.shape)
+        # gradient is scalar (or array of shape ()), multiply accordingly
+        grad_up = gradient * factor
+        # produce array shaped like elem
+        grad_elem = d_elem_dx * grad_up
+        # propagate to preds
+        preds.grad += grad_elem
+        # propagate to targets (negative)
+        grad_target = -grad_elem
+        # reduce broadcasted axes so it matches targets.data shape
+        grad_target_reduced = Tensor.checkbroadcast(targets, grad_target)
+        targets.grad += grad_target_reduced
+
+    out.grad_fn = grad_fn
+    return out
